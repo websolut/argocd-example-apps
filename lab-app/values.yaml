@@ -87,7 +87,11 @@ ingress:
 # it. Find one with:  kubectl get gateway -A
 
 httpRoute:
-  enabled: false
+  # On by default so an Argo CD Application created in the UI - which loads
+  # this file and nothing else - deploys the route without any extra setup.
+  # Set to false if your cluster has no Gateway API CRDs, or you would rather
+  # use the ingress block above.
+  enabled: true
   annotations: {}
 
   # The existing Gateway to attach to. Leave namespace empty when the Gateway
@@ -99,9 +103,11 @@ httpRoute:
       namespace: ""
       sectionName: ""
 
-  # Empty = match every hostname the listener accepts.
-  hostnames: []
-  #  - labapp.example.com
+  # Set a hostname. An empty list matches EVERY hostname the listener accepts,
+  # which on a shared Gateway means this route quietly swallows other apps'
+  # traffic - almost never what you want.
+  hostnames:
+    - labapp.websolutsg.co.uk
 
   # Optional. Used only when `rules` below is empty. Leave it empty and the
   # rule matches every path, which is what you want for a whole-hostname route.
