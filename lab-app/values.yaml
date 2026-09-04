@@ -168,7 +168,7 @@ httpRoute:
 # percentage OF THE REQUEST, so a small request makes scaling easy to trigger.
 resources:
   requests:
-    cpu: 50m
+    cpu: 5m
     memory: 64Mi
   limits:
     # No CPU limit on purpose: with a limit the pod gets throttled instead of
