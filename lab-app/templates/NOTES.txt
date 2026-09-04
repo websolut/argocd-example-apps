@@ -16,6 +16,16 @@
    http{{ if $.Values.ingress.tls }}s{{ end }}://{{ .host }}
 {{- end }}
 {{- end }}
+{{- if .Values.httpRoute.enabled }}
+
+   Or via the Gateway API route. Check it actually attached first - an
+   HTTPRoute no Gateway accepted is silently inert:
+
+   kubectl -n {{ .Release.Namespace }} describe httproute {{ include "lab-app.fullname" . }}
+{{- range .Values.httpRoute.parentRefs }}
+   kubectl -n {{ default $.Release.Namespace .namespace }} get gateway {{ .name }} -o wide
+{{- end }}
+{{- end }}
 
 2. Watch the logs:
 

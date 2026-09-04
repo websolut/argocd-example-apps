@@ -72,6 +72,91 @@ ingress:
   #   hosts:
   #     - lab-app.example.com
 
+# ----------------------------------------------------------------- gateway api
+# The modern replacement for Ingress. Enable EITHER ingress OR httpRoute.
+#
+# Requires the Gateway API CRDs and a controller. Check with:
+#   kubectl get crd gateways.gateway.networking.k8s.io
+#   kubectl get gatewayclass
+# On AKS the usual options are Application Gateway for Containers
+# (azure-alb-external), the Istio add-on (istio), or NGINX Gateway Fabric.
+#
+# The chart ships the HTTPRoute only. The Gateway itself - the object that owns
+# the public IP - is expected to already exist, which is how it normally works:
+# a platform team runs one shared Gateway and app teams only publish routes to
+# it. Find one with:  kubectl get gateway -A
+
+httpRoute:
+  enabled: false
+  annotations: {}
+
+  # The existing Gateway to attach to. Leave namespace empty when the Gateway
+  # is in this release's namespace, and sectionName empty to attach to every
+  # listener on it that will accept this route - both are omitted from the
+  # output when blank, which keeps the rendered route minimal.
+  parentRefs:
+    - name: platform-gateway
+      namespace: ""
+      sectionName: ""
+
+  # Empty = match every hostname the listener accepts.
+  hostnames: []
+  #  - labapp.example.com
+
+  # Optional. Used only when `rules` below is empty. Leave it empty and the
+  # rule matches every path, which is what you want for a whole-hostname route.
+  matches: []
+  #  - path:
+  #      type: PathPrefix
+  #      value: /
+
+  # Optional per-rule timeouts - something Ingress never had without annotations.
+  timeouts: {}
+  #  request: 15s
+  #  backendRequest: 10s
+
+  # Optional request/response filters. This is the part that replaces the pile
+  # of controller-specific annotations you needed with Ingress.
+  filters: []
+  #  - type: RequestHeaderModifier
+  #    requestHeaderModifier:
+  #      add:
+  #        - name: X-Lab
+  #          value: "true"
+  #  - type: URLRewrite
+  #    urlRewrite:
+  #      path:
+  #        type: ReplacePrefixMatch
+  #        replacePrefixMatch: /
+
+  # Weighted traffic splitting between this release and another Service.
+  # Deploy a second release (helm install lab-app-canary ... --set app.color=green)
+  # and send it a slice of the traffic. Weights are relative values.
+  canary:
+    enabled: false
+    serviceName: "" # e.g. lab-app-canary
+    port: 0 # 0 = same as service.port
+    weight: 10 # 10 of 100 -> ~10% to the canary
+
+  # Full control: if set, this replaces the generated rule entirely and
+  # matches/filters/timeouts/canary above are ignored. Useful for header-based
+  # routing, multiple paths, mirroring, cross-service fan-out.
+  rules: []
+  #  - matches:
+  #      - headers:
+  #          - name: x-canary
+  #            value: "always"
+  #    backendRefs:
+  #      - name: lab-app-canary
+  #        port: 80
+  #  - matches:
+  #      - path:
+  #          type: PathPrefix
+  #          value: /
+  #    backendRefs:
+  #      - name: lab-app
+  #        port: 80
+
 # -------------------------------------------------------------------- resources
 # requests are what the scheduler and the HPA use. The CPU HPA target is a
 # percentage OF THE REQUEST, so a small request makes scaling easy to trigger.

@@ -1,0 +1,44 @@
+# Overlay for the Gateway API lab (docs/LABS.md, lab 9).
+#
+# This chart ships an HTTPRoute only - it attaches to a Gateway that already
+# exists in the cluster. Find one and note its name and namespace:
+#
+#   kubectl get gatewayclass
+#   kubectl get gateway -A
+#
+# Then set parentRefs below to match. If there is no Gateway yet, whoever runs
+# the cluster has to create one - on AKS that is Application Gateway for
+# Containers (ALB Controller), the Istio add-on, or NGINX Gateway Fabric.
+#
+# Apply with:
+#   helm upgrade --install labapp charts/lab-app -n default \
+#     -f charts/lab-app/values.yaml \
+#     -f charts/lab-app/values-httproute.yaml
+
+# Name every object `labapp` rather than <release>-lab-app, so the HTTPRoute,
+# the Service it points at, and the hostname all line up. The backendRef in the
+# route is generated from this, so the two can never drift apart.
+fullnameOverride: labapp
+
+ingress:
+  enabled: false # Ingress and HTTPRoute would fight over the same hostname
+
+httpRoute:
+  enabled: true
+  hostnames:
+    - labapp.websolutsg.co.uk
+  parentRefs:
+    - name: platform-gateway
+      namespace: "" # empty = same namespace as this release
+      sectionName: "" # empty = any listener that accepts this route
+  matches: [] # no matches = every path
+  timeouts: {}
+  filters: []
+
+  # Weighted traffic splitting. Deploy a second release as the canary first:
+  #   helm upgrade --install labapp-canary charts/lab-app -n default \
+  #     -f charts/lab-app/values.yaml --set app.color=green
+  canary:
+    enabled: false
+    serviceName: labapp-canary
+    weight: 20

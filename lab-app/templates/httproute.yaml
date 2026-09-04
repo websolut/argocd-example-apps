@@ -1,0 +1,88 @@
+{{- if .Values.httpRoute.enabled }}
+{{/*
+Gateway API HTTPRoute - the successor to Ingress.
+
+Needs the Gateway API CRDs, a controller that implements them, and an existing
+Gateway to attach to. The chart deliberately does NOT create the Gateway: that
+object owns a public IP and is normally cluster-wide infrastructure, so app
+charts publish routes to it rather than owning it.
+
+  kubectl get gatewayclass     # is there a controller at all?
+  kubectl get gateway -A       # which Gateway can I attach to?
+
+Ingress and HTTPRoute both work here; enable one, not both.
+*/}}
+{{- $fullName := include "lab-app.fullname" . -}}
+{{- $svcPort := .Values.service.port -}}
+{{- $canary := .Values.httpRoute.canary -}}
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ $fullName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "lab-app.labels" . | nindent 4 }}
+  {{- with .Values.httpRoute.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.httpRoute.hostnames }}
+  hostnames:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  # The Gateway this route attaches to. Attachment is a two-way handshake,
+  # unlike Ingress: the Gateway's listener must also allow routes from this
+  # namespace. `kubectl describe httproute` reports the outcome under
+  # Parents -> Conditions -> Accepted.
+  parentRefs:
+    {{- range .Values.httpRoute.parentRefs }}
+    - name: {{ .name }}
+      {{- with .namespace }}
+      namespace: {{ . }}
+      {{- end }}
+      {{- with .sectionName }}
+      sectionName: {{ . }}
+      {{- end }}
+      {{- with .port }}
+      port: {{ . }}
+      {{- end }}
+      {{- with .kind }}
+      kind: {{ . }}
+      {{- end }}
+    {{- end }}
+  rules:
+    {{- if .Values.httpRoute.rules }}
+    {{- /* Full control: rules given verbatim in values. */}}
+    {{- toYaml .Values.httpRoute.rules | nindent 4 }}
+    {{- else }}
+    {{- /* Default: everything for these hostnames goes to this release.
+           A rule with no `matches` means "match every path". */}}
+    - backendRefs:
+        - name: {{ $fullName }}
+          port: {{ $svcPort }}
+          {{- if $canary.enabled }}
+          weight: {{ sub 100 (int $canary.weight) }}
+          {{- end }}
+        {{- if $canary.enabled }}
+        # Weighted traffic splitting, built into the API - no annotations, no
+        # second ingress controller. Weights are relative, not percentages;
+        # they only look like percentages because they add up to 100 here.
+        - name: {{ required "httpRoute.canary.serviceName is required when canary is enabled" $canary.serviceName }}
+          port: {{ default $svcPort $canary.port }}
+          weight: {{ int $canary.weight }}
+        {{- end }}
+      {{- with .Values.httpRoute.matches }}
+      matches:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.httpRoute.filters }}
+      filters:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.httpRoute.timeouts }}
+      timeouts:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    {{- end }}
+{{- end }}
