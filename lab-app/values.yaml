@@ -1,0 +1,247 @@
+# -----------------------------------------------------------------------------
+# lab-app default values
+#
+# Defaults are deliberately "safe for a learning cluster": 1 replica, small
+# requests, autoscaling off. Turn things on one at a time so you can see what
+# each knob actually does.
+# -----------------------------------------------------------------------------
+
+# Number of pods when autoscaling.enabled = false.
+# When autoscaling is on, this field is ignored (the HPA owns the replica count).
+replicaCount: 1
+
+image:
+  # The app is plain Python stdlib mounted from a ConfigMap, so any python image works.
+  # No build, no ACR push. Swap this for your own image later if you want.
+  repository: python
+  tag: "3.12-alpine"
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+# ------------------------------------------------------------------ app config
+# These become environment variables in the container (see configmap-env.yaml).
+app:
+  # Free-text label shown in /info, logs and metrics. Handy for rollout demos:
+  # change color from blue to green and watch the rolling update.
+  color: blue
+  environment: dev
+
+  port: 8080
+
+  # Background log emission. 1 = one line per second per pod.
+  # Runtime override without a redeploy:  curl "$URL/lograte?rps=50"
+  logRate: 2
+  logFormat: json # json | text
+
+  # Seconds before /readyz starts returning 200. Raise this to watch a rolling
+  # update crawl, or to see why a startupProbe exists.
+  startupDelaySeconds: 3
+
+  # On SIGTERM the app fails readiness, keeps serving for this long, then exits.
+  # Keep it < terminationGracePeriodSeconds or the kubelet SIGKILLs you.
+  shutdownDelaySeconds: 5
+
+  # Extra env vars, e.g. - name: FOO
+  #                        value: bar
+  extraEnv: []
+
+# ---------------------------------------------------------------------- service
+service:
+  type: ClusterIP # ClusterIP | LoadBalancer | NodePort
+  port: 80
+  annotations: {}
+  # For an internal AKS load balancer:
+  #   service.beta.kubernetes.io/azure-load-balancer-internal: "true"
+
+# ---------------------------------------------------------------------- ingress
+ingress:
+  enabled: false
+  className: webapprouting.kubernetes.azure.com # AKS app routing add-on; use "nginx" for ingress-nginx
+  annotations: {}
+  hosts:
+    - host: lab-app.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+  # - secretName: lab-app-tls
+  #   hosts:
+  #     - lab-app.example.com
+
+# -------------------------------------------------------------------- resources
+# requests are what the scheduler and the HPA use. The CPU HPA target is a
+# percentage OF THE REQUEST, so a small request makes scaling easy to trigger.
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    # No CPU limit on purpose: with a limit the pod gets throttled instead of
+    # showing high utilisation, which makes HPA demos confusing. Set one to
+    # see CPU throttling for yourself.
+    memory: 256Mi
+
+# ------------------------------------------------------------------ autoscaling
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 60
+  targetMemoryUtilizationPercentage: 0 # 0 = disabled
+  # Scale-up/scale-down pacing (autoscaling/v2). Defaults here are deliberately
+  # snappier than Kubernetes defaults so a lab exercise does not take 5 minutes.
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 15
+        - type: Pods
+          value: 4
+          periodSeconds: 15
+      selectPolicy: Max
+    scaleDown:
+      stabilizationWindowSeconds: 60
+      policies:
+        - type: Percent
+          value: 50
+          periodSeconds: 30
+
+# --------------------------------------------------------------------- rollouts
+# Watch these change behaviour during `kubectl rollout status`.
+strategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxSurge: 1
+    maxUnavailable: 0
+
+# Time the kubelet waits after SIGTERM before SIGKILL.
+terminationGracePeriodSeconds: 30
+
+# preStop sleep gives kube-proxy/ingress time to stop sending new connections
+# before the process starts shutting down. Classic fix for 502s during deploys.
+lifecycle:
+  preStopSleepSeconds: 5
+
+# ----------------------------------------------------------------------- probes
+probes:
+  startup:
+    enabled: true
+    path: /healthz
+    initialDelaySeconds: 0
+    periodSeconds: 2
+    failureThreshold: 30 # 30 * 2s = 60s to start before it gets killed
+  readiness:
+    enabled: true
+    path: /readyz
+    periodSeconds: 5
+    timeoutSeconds: 2
+    failureThreshold: 3
+  liveness:
+    enabled: true
+    path: /healthz
+    periodSeconds: 10
+    timeoutSeconds: 2
+    failureThreshold: 3
+
+# --------------------------------------------------------------------- sidecars
+# You asked for a single container by default - all of these are off.
+# Flip one at a time to learn the multi-container patterns.
+sidecars:
+  # Pattern 1: streaming sidecar. The app also writes its logs to a file on a
+  # shared emptyDir; this container tails that file to its own stdout, so
+  # `kubectl logs <pod> -c log-tailer` shows them separately.
+  logTailer:
+    enabled: false
+    image: busybox:1.36
+    resources:
+      requests:
+        cpu: 10m
+        memory: 16Mi
+      limits:
+        memory: 32Mi
+
+  # Pattern 2: native sidecar (Kubernetes 1.29+/AKS 1.29+). It is an
+  # initContainer with restartPolicy: Always, so it starts BEFORE the app and
+  # is guaranteed to outlive it - the correct pattern for log shippers and proxies.
+  native:
+    enabled: false
+    name: heartbeat
+    image: busybox:1.36
+    resources:
+      requests:
+        cpu: 10m
+        memory: 16Mi
+
+# Raw escape hatches - full container specs, appended as-is.
+extraContainers: []
+initContainers: []
+
+# ------------------------------------------------------------------- scheduling
+nodeSelector:
+  kubernetes.io/os: linux
+
+tolerations: []
+affinity: {}
+
+# Spread pods across zones/nodes. Only meaningful once you scale past 1 replica;
+# on a single-node cluster set whenUnsatisfiable: ScheduleAnyway (as below).
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: topology.kubernetes.io/zone
+    whenUnsatisfiable: ScheduleAnyway
+    labelSelector:
+      matchLabels:
+        app.kubernetes.io/name: lab-app
+
+# Prefer not to stack replicas on one node.
+podAntiAffinity:
+  enabled: true
+  type: preferred # preferred | required
+
+# ---------------------------------------------------- disruption + permissions
+podDisruptionBudget:
+  # Leave off while replicaCount is 1, or node drains will block.
+  enabled: false
+  minAvailable: 1
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+  # For Azure Workload Identity:
+  #   azure.workload.identity/client-id: <client-id>
+automountServiceAccountToken: false
+
+# ------------------------------------------------------------------- hardening
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+# ------------------------------------------------------------------ monitoring
+# Needs the Prometheus Operator CRDs (e.g. Azure Managed Prometheus or
+# kube-prometheus-stack). Off by default so `helm template` never breaks.
+serviceMonitor:
+  enabled: false
+  interval: 30s
+  labels: {}
+
+podAnnotations: {}
+podLabels: {}
+commonLabels: {}

@@ -1,0 +1,14 @@
+{{/*
+The application source, shipped inside the chart and mounted read-only at /app.
+This is why the lab needs no image build and no container registry.
+For real workloads you would bake this into an image instead.
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "lab-app.fullname" . }}-src
+  labels:
+    {{- include "lab-app.labels" . | nindent 4 }}
+data:
+  app.py: |
+    {{- .Files.Get "files/app.py" | nindent 4 }}

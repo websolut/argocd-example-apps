@@ -1,0 +1,42 @@
+# Overlay for a "production-shaped" environment (used by argocd/application-prod.yaml).
+# Nothing here is exotic - it is the same chart with the safety features switched on.
+
+app:
+  color: green
+  environment: prod
+  logRate: 1
+  startupDelaySeconds: 5
+  shutdownDelaySeconds: 10
+
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 20
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    memory: 512Mi
+
+terminationGracePeriodSeconds: 60
+lifecycle:
+  preStopSleepSeconds: 10
+
+# Never voluntarily drop below 2 pods during node drains / AKS upgrades.
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 2
+
+podAntiAffinity:
+  enabled: true
+  type: preferred
+
+strategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxSurge: 1
+    maxUnavailable: 0

@@ -1,0 +1,40 @@
+{{ include "lab-app.fullname" . }} deployed to namespace {{ .Release.Namespace }}.
+
+  version : {{ .Chart.AppVersion }} ({{ .Values.app.color }})
+  replicas: {{ if .Values.autoscaling.enabled }}HPA {{ .Values.autoscaling.minReplicas }}-{{ .Values.autoscaling.maxReplicas }} @ {{ .Values.autoscaling.targetCPUUtilizationPercentage }}% CPU{{ else }}{{ .Values.replicaCount }} (fixed){{ end }}
+  logs    : {{ .Values.app.logRate }} lines/sec/pod, format {{ .Values.app.logFormat }}
+
+1. Reach the app:
+
+   kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "lab-app.fullname" . }} 8080:{{ .Values.service.port }}
+   curl localhost:8080/info
+
+{{- if .Values.ingress.enabled }}
+
+   Or via ingress:
+{{- range .Values.ingress.hosts }}
+   http{{ if $.Values.ingress.tls }}s{{ end }}://{{ .host }}
+{{- end }}
+{{- end }}
+
+2. Watch the logs:
+
+   kubectl -n {{ .Release.Namespace }} logs -l app.kubernetes.io/name={{ include "lab-app.name" . }} -f --prefix --tail=20
+
+3. Drive some load and watch it scale:
+
+   curl "localhost:8080/burn?seconds=120"
+   kubectl -n {{ .Release.Namespace }} get hpa,pods -w
+
+4. Other things to poke:
+
+   /slow?ms=3000        slow response
+   /mem?mb=200          hold memory
+   /error?code=503      log an error and return it
+   /toggle?what=ready&value=false    fail readiness (pod leaves the Service)
+   /toggle?what=health&value=false   fail liveness  (container gets restarted)
+   /crash               exit(1) -> restart, then CrashLoopBackOff
+   /lograte?rps=100     flood the log pipeline
+   /metrics             Prometheus metrics
+
+See docs/LABS.md in the repo for the guided exercises.

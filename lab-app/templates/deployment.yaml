@@ -1,0 +1,239 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "lab-app.fullname" . }}
+  labels:
+    {{- include "lab-app.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  {{- /*
+    When the HPA owns the replica count we must NOT render `replicas` at all.
+    Otherwise Helm/Argo CD keeps resetting it to the chart value and fights the
+    HPA - pods flap up and down forever. This is the single most common
+    "why does my autoscaling not stick" bug with GitOps.
+  */}}
+  revisionHistoryLimit: 5
+  strategy:
+    type: {{ .Values.strategy.type }}
+    {{- if eq .Values.strategy.type "RollingUpdate" }}
+    rollingUpdate:
+      {{- toYaml .Values.strategy.rollingUpdate | nindent 6 }}
+    {{- end }}
+  selector:
+    matchLabels:
+      {{- include "lab-app.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        # Roll the pods whenever the app source or its config changes.
+        checksum/src: {{ include (print $.Template.BasePath "/configmap-app.yaml") . | sha256sum }}
+        checksum/env: {{ include (print $.Template.BasePath "/configmap-env.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "lab-app.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "lab-app.serviceAccountName" . }}
+      automountServiceAccountToken: {{ .Values.automountServiceAccountToken }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+
+      {{- if or .Values.initContainers .Values.sidecars.native.enabled }}
+      initContainers:
+        {{- if .Values.sidecars.native.enabled }}
+        # ---- native sidecar (Kubernetes 1.29+) -------------------------------
+        # An initContainer with restartPolicy: Always. It starts before the app
+        # container, keeps running alongside it, and is torn down last. Use this
+        # shape for log shippers, proxies and agents.
+        - name: {{ .Values.sidecars.native.name }}
+          image: {{ .Values.sidecars.native.image }}
+          restartPolicy: Always
+          command:
+            - sh
+            - -c
+            - |
+              while true; do
+                echo "{\"level\":\"INFO\",\"logger\":\"{{ .Values.sidecars.native.name }}\",\"msg\":\"native sidecar alive\",\"pod\":\"$POD_NAME\"}"
+                sleep 10
+              done
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          resources:
+            {{- toYaml .Values.sidecars.native.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+        {{- end }}
+        {{- with .Values.initContainers }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- end }}
+
+      containers:
+        # ---- the application ------------------------------------------------
+        - name: app
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["python", "/app/app.py"]
+          ports:
+            - name: http
+              containerPort: {{ .Values.app.port }}
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: {{ include "lab-app.fullname" . }}-env
+          env:
+            # Downward API: the pod tells the app who and where it is. This is
+            # what makes `curl /info` useful once you scale to many replicas.
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            {{- with .Values.app.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- if .Values.probes.startup.enabled }}
+          startupProbe:
+            httpGet:
+              path: {{ .Values.probes.startup.path }}
+              port: http
+            initialDelaySeconds: {{ .Values.probes.startup.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.startup.periodSeconds }}
+            failureThreshold: {{ .Values.probes.startup.failureThreshold }}
+          {{- end }}
+          {{- if .Values.probes.readiness.enabled }}
+          readinessProbe:
+            # Fails -> pod is removed from the Service endpoints but NOT restarted.
+            httpGet:
+              path: {{ .Values.probes.readiness.path }}
+              port: http
+            periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.readiness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.readiness.failureThreshold }}
+          {{- end }}
+          {{- if .Values.probes.liveness.enabled }}
+          livenessProbe:
+            # Fails -> the container is KILLED and restarted. Different job entirely.
+            httpGet:
+              path: {{ .Values.probes.liveness.path }}
+              port: http
+            periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.liveness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.liveness.failureThreshold }}
+          {{- end }}
+          {{- if gt (int .Values.lifecycle.preStopSleepSeconds) 0 }}
+          lifecycle:
+            preStop:
+              # Sleep before the app sees SIGTERM, so kube-proxy and the ingress
+              # have time to stop routing new connections here. Removes most
+              # 502s during a rolling update.
+              exec:
+                command: ["sleep", "{{ .Values.lifecycle.preStopSleepSeconds }}"]
+          {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            - name: src
+              mountPath: /app
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+            {{- if include "lab-app.needsLogVolume" . }}
+            - name: applogs
+              mountPath: /var/log/app
+            {{- end }}
+
+        {{- if .Values.sidecars.logTailer.enabled }}
+        # ---- streaming log sidecar ------------------------------------------
+        # The app writes to a file on a shared emptyDir; this container tails it
+        # to its own stdout. `kubectl logs <pod> -c log-tailer` shows only these.
+        - name: log-tailer
+          image: {{ .Values.sidecars.logTailer.image }}
+          command: ["sh", "-c", "tail -n+1 -F /var/log/app/app.log 2>/dev/null | sed 's/^/[tailer] /'"]
+          resources:
+            {{- toYaml .Values.sidecars.logTailer.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            - name: applogs
+              mountPath: /var/log/app
+              readOnly: true
+        {{- end }}
+
+        {{- with .Values.extraContainers }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+
+      volumes:
+        - name: src
+          configMap:
+            name: {{ include "lab-app.fullname" . }}-src
+            defaultMode: 0555
+        - name: tmp
+          emptyDir: {}
+        {{- if include "lab-app.needsLogVolume" . }}
+        - name: applogs
+          emptyDir: {}
+        {{- end }}
+
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.affinity }}
+      affinity:
+        {{- toYaml .Values.affinity | nindent 8 }}
+      {{- else if .Values.podAntiAffinity.enabled }}
+      affinity:
+        podAntiAffinity:
+          {{- if eq .Values.podAntiAffinity.type "required" }}
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchLabels:
+                  {{- include "lab-app.selectorLabels" . | nindent 18 }}
+          {{- else }}
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    {{- include "lab-app.selectorLabels" . | nindent 20 }}
+          {{- end }}
+      {{- end }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

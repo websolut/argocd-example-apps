@@ -1,0 +1,29 @@
+{{/*
+Runtime configuration as environment variables.
+
+The Deployment carries a checksum annotation over this file, so editing a value
+here rolls the pods. Change something and watch `kubectl rollout status` - that
+behaviour is not automatic in Kubernetes, the annotation is what causes it.
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "lab-app.fullname" . }}-env
+  labels:
+    {{- include "lab-app.labels" . | nindent 4 }}
+data:
+  APP_NAME: {{ include "lab-app.name" . | quote }}
+  APP_VERSION: {{ .Chart.AppVersion | quote }}
+  APP_COLOR: {{ .Values.app.color | quote }}
+  ENVIRONMENT: {{ .Values.app.environment | quote }}
+  PORT: {{ .Values.app.port | quote }}
+  LOG_RATE: {{ .Values.app.logRate | quote }}
+  LOG_FORMAT: {{ .Values.app.logFormat | quote }}
+  STARTUP_DELAY_SECONDS: {{ .Values.app.startupDelaySeconds | quote }}
+  SHUTDOWN_DELAY_SECONDS: {{ .Values.app.shutdownDelaySeconds | quote }}
+  PYTHONUNBUFFERED: "1"
+  PYTHONDONTWRITEBYTECODE: "1"
+  {{- if include "lab-app.needsLogVolume" . }}
+  # Also mirror logs to a file so the log-tailer sidecar has something to read.
+  LOG_FILE: /var/log/app/app.log
+  {{- end }}

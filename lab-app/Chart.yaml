@@ -1,0 +1,21 @@
+apiVersion: v2
+name: lab-app
+description: A small, self-contained web app for learning Kubernetes/AKS - scaling, probes, sidecars, rollouts and logs.
+type: application
+
+# version    = the chart version. Bump this when you change the chart.
+# appVersion = the version of the app inside it. Shown in logs, /info and metrics.
+version: 0.1.0
+appVersion: "1.0.0"
+
+keywords:
+  - learning
+  - aks
+  - autoscaling
+  - argocd
+home: https://github.com/YOUR-ORG/aks-lab
+maintainers:
+  - name: Sergiy Grykshtas
+
+# HPA behaviour (autoscaling/v2) needs 1.23+; native sidecars need 1.29+.
+kubeVersion: ">=1.25.0-0"

@@ -1,0 +1,26 @@
+# Overlay for the dev environment (used by argocd/application-dev.yaml).
+# Autoscaling is on here so you have something to experiment with.
+
+app:
+  color: blue
+  environment: dev
+  logRate: 2
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 8
+  targetCPUUtilizationPercentage: 60
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    memory: 256Mi
+
+podDisruptionBudget:
+  enabled: false
+
+ingress:
+  enabled: false

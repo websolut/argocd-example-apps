@@ -1,0 +1,24 @@
+# Overlay for the sidecar lab (docs/LABS.md, lab 3).
+#
+# Turns on both multi-container patterns so you can compare them:
+#   log-tailer -> classic sidecar, a normal entry under spec.containers
+#   heartbeat  -> native sidecar, an initContainer with restartPolicy: Always
+#
+# Apply with:  helm upgrade --install lab-app charts/lab-app \
+#                -f charts/lab-app/values.yaml -f charts/lab-app/values-sidecar.yaml
+
+sidecars:
+  logTailer:
+    enabled: true
+  native:
+    enabled: true # needs Kubernetes 1.29+ (check: kubectl version)
+
+# Extra containers are also accepted verbatim, if you want to bring your own.
+extraContainers: []
+#  - name: shell
+#    image: busybox:1.36
+#    command: ["sh", "-c", "sleep infinity"]
+#    resources:
+#      requests:
+#        cpu: 10m
+#        memory: 16Mi

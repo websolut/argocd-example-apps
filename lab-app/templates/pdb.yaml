@@ -1,0 +1,18 @@
+{{- if .Values.podDisruptionBudget.enabled }}
+{{/*
+A PDB only affects *voluntary* disruption: node drains, cluster upgrades,
+cluster-autoscaler scale-in. It never stops a crash or a node failure.
+Careful: minAvailable >= replicas will block AKS node pool upgrades forever.
+*/}}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "lab-app.fullname" . }}
+  labels:
+    {{- include "lab-app.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "lab-app.selectorLabels" . | nindent 6 }}
+{{- end }}
