@@ -1,0 +1,140 @@
+{{ include "demo-app.fullname" . }} deployed to namespace {{ .Release.Namespace }}.
+
+  controller : {{ include "demo-app.controllerKind" . }}
+  version    : {{ .Chart.AppVersion }}
+  replicas   : {{ if .Values.autoscaling.enabled }}HPA {{ .Values.autoscaling.minReplicas }}-{{ .Values.autoscaling.maxReplicas }} @ {{ .Values.autoscaling.targetCPUUtilizationPercentage }}% CPU{{ else }}{{ .Values.replicaCount }} (fixed){{ end }}
+{{- if eq .Values.storage.mode "none" }}
+  storage    : emptyDir, max {{ .Values.storage.emptyDirSizeLimit }}, at {{ .Values.storage.mountPath }}
+               NOTHING PERSISTS. Data dies with the pod - that is the point.
+{{- else if eq .Values.storage.mode "shared" }}
+  storage    : one shared PVC {{ include "demo-app.claimName" . }}
+               {{ .Values.storage.size }} {{ join "," .Values.storage.accessModes }} class={{ default "(cluster default)" .Values.storage.className }}
+               at {{ .Values.storage.mountPath }}, mounted by every replica
+{{- else }}
+  storage    : one PVC PER POD ({{ .Values.storage.size }} {{ join "," .Values.storage.accessModes }} class={{ default "(cluster default)" .Values.storage.className }})
+               claims are named data-{{ include "demo-app.fullname" . }}-0, -1, ...
+               retention: whenDeleted={{ .Values.storage.perPod.claimRetention.whenDeleted }} whenScaled={{ .Values.storage.perPod.claimRetention.whenScaled }}
+{{- end }}
+
+{{- if eq .Values.storage.mode "none" }}
+1. Check the pods came up. There is no PersistentVolumeClaim in this mode - the
+   volume is an emptyDir the kubelet creates on the node, so there is nothing to
+   bind and nothing to wait for.
+
+   kubectl -n {{ .Release.Namespace }} get pods
+{{- else }}
+1. Check the claim actually bound. Do this FIRST - a Pending PVC means the pods
+   will sit in ContainerCreating and nothing else you try will make sense.
+
+   kubectl -n {{ .Release.Namespace }} get pvc
+   kubectl -n {{ .Release.Namespace }} get pods
+   kubectl -n {{ .Release.Namespace }} describe pvc | tail -20
+{{- end }}
+
+2. Reach the app:
+
+   kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "demo-app.fullname" . }} 8080:{{ .Values.service.port }}
+   curl localhost:8080/info
+{{- if .Values.httpRoute.enabled }}
+
+   Or through the Gateway:
+{{- range .Values.httpRoute.hostnames }}
+   https://{{ . }}
+{{- end }}
+
+   Check the route was ACCEPTED before you trust that URL. An HTTPRoute no
+   Gateway accepted is created, synced and completely inert - look under
+   Parents -> Conditions:
+
+   kubectl -n {{ .Release.Namespace }} describe httproute {{ include "demo-app.fullname" . }}
+{{- range .Values.httpRoute.parentRefs }}
+   kubectl -n {{ default $.Release.Namespace .namespace }} get gateway {{ .name }} -o wide
+{{- end }}
+
+   Two things reject it, both silently. The listener may not allow routes from
+   {{ .Release.Namespace }} - it needs allowedRoutes.namespaces.from: All - or
+   this route hostname may not intersect the listener hostname. Compare them:
+{{- range .Values.httpRoute.parentRefs }}
+
+   kubectl -n {{ default $.Release.Namespace .namespace }} get gateway {{ .name }} -o jsonpath='{.spec.listeners}' | ConvertFrom-Json | Format-List
+{{- end }}
+{{- end }}
+
+3. Ask it about its volume:
+
+   curl localhost:8080/df       capacity, used, free, and the filesystem type
+   curl localhost:8080/boots    how many process starts this volume remembers
+   curl localhost:8080/ls       what is on it
+
+   /boots is the one to understand. It reports how many times a process has
+   started against this volume:
+{{- if eq .Values.storage.mode "none" }}
+   with emptyDir the count climbs while the POD lives - the volume is scoped to
+   the pod, so a container crash keeps it - and resets to 1 the moment the pod
+   itself is replaced. Which, on a real cluster, is constantly.
+{{- else if eq .Values.storage.mode "shared" }}
+   with a shared volume every replica appends, so distinct_pods_seen grows to
+   match your replica count. That is the proof RWX is really working.
+{{- else }}
+   with per-pod volumes each pod sees only its own line, but that history
+   survives a restart - so boots_recorded climbs while distinct_pods_seen
+   stays at 1.
+{{- end }}
+
+4. Prove persistence (or the lack of it). Delete the POD, not the container -
+   a crash restarts the container in place and even an emptyDir survives that,
+   so /crash tells you much less than it looks like it does:
+
+   curl localhost:8080/write?mb=32     write a timed 32 MB file, fsynced
+   kubectl -n {{ .Release.Namespace }} delete pod -l app.kubernetes.io/name={{ include "demo-app.name" . }}
+   # wait for the replacement, re-establish the port-forward, then:
+   curl localhost:8080/ls              is the file still there?
+   curl localhost:8080/boots           did the boot count survive?
+
+5. Make it scale:
+
+   curl "localhost:8080/burn?seconds=180"
+   kubectl -n {{ .Release.Namespace }} get hpa,pods -w
+{{- if include "demo-app.isStateful" . }}
+
+   Watch the claims appear alongside the pods - each new replica provisions its
+   own disk, which takes longer than starting a container:
+
+   kubectl -n {{ .Release.Namespace }} get pvc -w
+{{- end }}
+
+{{- if eq .Values.storage.mode "none" }}
+6. Do NOT run /fill in this mode. An emptyDir has no filesystem boundary of its
+   own - emptyDirSizeLimit is an eviction quota, not a quota the filesystem
+   enforces - so filling it fills the NODE disk and takes the other pods on
+   that node down with it. Switch to a real volume first:
+
+   helm upgrade --install {{ .Release.Name }} demo -f demo/values.yaml -f demo/values-shared.yaml -n {{ .Release.Namespace }}
+{{- else }}
+6. Fill it up and watch it break:
+
+   curl "localhost:8080/fill?percent=95"
+   kubectl -n {{ .Release.Namespace }} exec {{ if include "demo-app.isStateful" . }}{{ include "demo-app.fullname" . }}-0{{ else }}deploy/{{ include "demo-app.fullname" . }}{{ end }} -- df -h {{ .Values.storage.mountPath }}
+   curl localhost:8080/rm?name=fill    clean up afterwards
+{{- end }}
+
+{{- if include "demo-app.isStateful" . }}
+
+7. Talk to one specific replica, and therefore one specific volume:
+
+   kubectl -n {{ .Release.Namespace }} run curl --rm -it --image=curlimages/curl --restart=Never -- \
+     curl -s http://{{ include "demo-app.fullname" . }}-0.{{ include "demo-app.headlessName" . }}:{{ .Values.service.port }}/boots
+{{- end }}
+{{- if and (eq .Values.storage.mode "shared") (not (has "ReadWriteMany" .Values.storage.accessModes)) }}
+
+WARNING: storage.mode is "shared" but accessModes is {{ join "," .Values.storage.accessModes }},
+not ReadWriteMany. One volume, many replicas, and a volume that can only attach
+to one node at a time. The first pod will run; the rest will hang in
+ContainerCreating with a Multi-Attach error.
+
+If that was deliberate, good - that is lab 4 in docs/LABS.md. Watch it happen:
+  kubectl -n {{ .Release.Namespace }} get pods
+  kubectl -n {{ .Release.Namespace }} describe pod -l app.kubernetes.io/name={{ include "demo-app.name" . }} | grep -A5 Events
+{{- end }}
+
+See docs/LABS.md in this folder for the guided exercises.

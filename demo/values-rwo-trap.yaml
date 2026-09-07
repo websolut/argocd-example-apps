@@ -1,0 +1,60 @@
+# -----------------------------------------------------------------------------
+# Overlay: the Multi-Attach trap, on purpose
+#
+#   helm upgrade --install demo-app demo -f demo/values.yaml -f demo/values-rwo-trap.yaml
+#
+# This configuration is WRONG and is meant to be. It is the single most common
+# AKS storage mistake: a Deployment with several replicas, one PersistentVolume
+# behind them, and a ReadWriteOnce disk underneath that can only ever attach to
+# one node.
+#
+# What you will see:
+#   * one pod Running, the rest stuck in ContainerCreating, forever
+#   * kubectl describe pod on a stuck one:
+#       Multi-Attach error for volume "pvc-..."
+#       Volume is already exclusively attached to one node and cannot be
+#       attached to another
+#   * the HPA happily reporting that it scaled to 4 replicas, because scaling
+#     succeeded. The Deployment did what it was told. The volume could not.
+#
+# The lesson is that "ReadWriteOnce" restricts the NODE, not the pod. Two pods
+# on the SAME node can share an RWO volume quite happily, which is why this
+# sometimes appears to work on a one-node cluster and then breaks the moment
+# the cluster grows. Force the failure with podAntiAffinity: required below.
+#
+# The two real fixes:
+#   1. values-shared.yaml  - ReadWriteMany on Azure Files, if the app genuinely
+#                            needs all replicas to see the same data
+#   2. values-perpod.yaml  - a StatefulSet giving each pod its own disk, if it
+#                            does not
+# -----------------------------------------------------------------------------
+storage:
+  mode: shared # one volume for everyone...
+  className: managed-csi # ...on an Azure Disk...
+  accessModes:
+    - ReadWriteOnce # ...that only one node can have.
+  size: 4Gi
+  mountPath: /data
+  # Do not leave orphaned disks behind after a deliberately broken experiment.
+  retainOnDelete: false
+
+# Fixed replicas rather than an HPA, so the failure is immediate and repeatable
+# instead of depending on load.
+autoscaling:
+  enabled: false
+replicaCount: 3
+
+# This is what guarantees the failure. Without it the scheduler may put all
+# three replicas on one node, where an RWO volume works fine and the bug hides.
+podAntiAffinity:
+  enabled: true
+  type: required
+
+app:
+  environment: broken-on-purpose
+
+# No route. Two of the three pods will never start, so there is nothing to
+# publish, and claiming a hostname on the shared Gateway for a deliberately
+# broken release would only confuse the other experiments.
+httpRoute:
+  enabled: false

@@ -1,0 +1,70 @@
+{{- if include "demo-app.isStateful" . }}
+{{- include "demo-app.validateStorage" . }}
+{{/*
+Used for storage.mode = perPod.
+
+The StatefulSet is here for exactly one reason: volumeClaimTemplates. It is the
+only controller that creates a PersistentVolumeClaim PER REPLICA, so pod 0 gets
+data-<name>-0, pod 1 gets data-<name>-1, and each keeps its own disk across
+restarts, reschedules and scale-down/scale-up cycles.
+
+Everything else a StatefulSet gives you - stable names, stable DNS, ordered
+rollout - follows from that identity being durable.
+*/}}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "demo-app.fullname" . }}
+  labels:
+    {{- include "demo-app.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  {{- /* Same rule as the Deployment: omit replicas when the HPA owns it. */}}
+
+  # Points at the headless Service. This is what gives each pod its own DNS
+  # name, e.g. <name>-0.<name>-headless.<namespace>.svc.cluster.local, which is
+  # how you talk to one specific replica and therefore to one specific volume.
+  serviceName: {{ include "demo-app.headlessName" . }}
+
+  podManagementPolicy: {{ .Values.storage.perPod.podManagementPolicy }}
+  revisionHistoryLimit: 5
+  updateStrategy:
+    type: {{ .Values.statefulSetUpdate.type }}
+    {{- if eq .Values.statefulSetUpdate.type "RollingUpdate" }}
+    rollingUpdate:
+      # Only pods with an ordinal >= partition get updated. Set it to 2 with 3
+      # replicas and only pod 2 rolls - a canary you drive by lowering a number.
+      partition: {{ .Values.statefulSetUpdate.partition }}
+    {{- end }}
+
+  # Kubernetes 1.27+. Retain/Retain is why a StatefulSet scaled from 3 to 1 and
+  # back to 3 gives the returning pods their original data. Set whenScaled to
+  # Delete and that data is gone the moment you scale in.
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: {{ .Values.storage.perPod.claimRetention.whenDeleted }}
+    whenScaled: {{ .Values.storage.perPod.claimRetention.whenScaled }}
+
+  selector:
+    matchLabels:
+      {{- include "demo-app.selectorLabels" . | nindent 6 }}
+  template:
+    {{- include "demo-app.podTemplate" . | nindent 4 }}
+
+  volumeClaimTemplates:
+    # The name here must match the volumeMount name in the pod template.
+    - metadata:
+        name: data
+        labels:
+          {{- include "demo-app.labels" . | nindent 10 }}
+      spec:
+        accessModes:
+          {{- toYaml .Values.storage.accessModes | nindent 10 }}
+        {{- if .Values.storage.className }}
+        storageClassName: {{ .Values.storage.className }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.storage.size }}
+{{- end }}

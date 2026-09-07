@@ -1,0 +1,52 @@
+# -----------------------------------------------------------------------------
+# Overlay: one Azure Files share, mounted by every replica (storage.mode = shared)
+#
+#   helm upgrade --install demo-app demo -f demo/values.yaml -f demo/values-shared.yaml
+#
+# This is the combination that lets a Deployment autoscale AND keep data: a
+# ReadWriteMany volume can be mounted on many nodes at once, so the HPA is free
+# to add pods without any of them fighting over the disk.
+#
+# What you give up is speed. Azure Files is SMB over the network - fsync
+# latency is milliseconds rather than microseconds. Compare the numbers:
+#
+#   curl "$URL/write?mb=64&fsync=1"     # here
+#   curl "$URL/write?mb=64&fsync=1"     # against values-perpod.yaml
+#
+# and the fsync_ms field will usually differ by an order of magnitude.
+# -----------------------------------------------------------------------------
+storage:
+  mode: shared
+  className: azurefile-csi # azurefile-csi-premium is much faster, and costs more
+  accessModes:
+    - ReadWriteMany
+  size: 5Gi
+  mountPath: /data
+  retainOnDelete: true
+
+# Note what is NOT set here: podSecurityContext.fsGroup does nothing useful on a
+# cifs mount, because the SMB client decides ownership at mount time. If the app
+# reports writable=false on /info, the fix is in the StorageClass mountOptions
+# (uid/gid), not in the pod. Enable storageClass.create in values.yaml to get a
+# class that sets them.
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 8
+  targetCPUUtilizationPercentage: 60
+
+# Force replicas onto different nodes. With a shared volume that is exactly what
+# you want to prove: several nodes, one share, all of them writing to it.
+podAntiAffinity:
+  enabled: true
+  type: preferred
+
+app:
+  environment: shared
+  logRate: 2
+
+# The primary hostname. This is the mode you would actually run.
+httpRoute:
+  hostnames:
+    - demoapp.websolutsg.co.uk

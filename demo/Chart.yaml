@@ -1,0 +1,22 @@
+apiVersion: v2
+name: demo-app
+description: A small Python app for learning AKS storage and autoscaling - PVCs, StorageClasses, volume expansion and the HPA.
+type: application
+
+# version    = the chart version. Bump this when you change the chart.
+# appVersion = the version of the app inside it. Shown in logs, /info and metrics.
+version: 0.1.0
+appVersion: "1.0.0"
+
+keywords:
+  - learning
+  - aks
+  - storage
+  - autoscaling
+  - argocd
+maintainers:
+  - name: Sergiy Grykshtas
+
+# HPA behaviour (autoscaling/v2) needs 1.23+.
+# StatefulSet persistentVolumeClaimRetentionPolicy went stable in 1.27.
+kubeVersion: ">=1.27.0-0"

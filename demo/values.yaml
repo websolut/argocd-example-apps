@@ -1,0 +1,374 @@
+# -----------------------------------------------------------------------------
+# demo-app default values
+#
+# This chart is a sibling of ../lab-app. That one teaches probes, sidecars and
+# rolling updates; this one teaches STORAGE and the HPA. Read the `storage`
+# block below first - it is the only really interesting part.
+#
+# Defaults are safe for a learning cluster: a 2Gi shared volume, 2-8 replicas.
+# -----------------------------------------------------------------------------
+
+# Number of pods when autoscaling.enabled = false.
+# When autoscaling is on this field is ignored (the HPA owns the replica count).
+replicaCount: 2
+
+image:
+  # The app is plain Python stdlib mounted from a ConfigMap, so any python image
+  # works. No build, no ACR push.
+  repository: python
+  tag: "3.12-alpine"
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+# =============================================================================
+# STORAGE - the point of this chart
+#
+# Three modes. Each produces a genuinely different Kubernetes object graph, and
+# the app behaves differently on each because the volume underneath does.
+#
+#   none    emptyDir. Lives and dies with the pod. Controller: Deployment.
+#           Use it to see what you LOSE - /boots always reports 1 boot.
+#
+#   shared  ONE PersistentVolumeClaim, ReadWriteMany, mounted by every replica.
+#           Controller: Deployment. On AKS that means Azure Files
+#           (azurefile-csi). Every replica sees the same bytes, so /boots lists
+#           all of them. This is the only mode where the HPA can scale past one
+#           pod against a single volume.
+#
+#   perPod  A StatefulSet with volumeClaimTemplates: each pod gets its OWN
+#           ReadWriteOnce claim (Azure Disk, managed-csi). demo-app-0 keeps
+#           demo-app-0 data across restarts and reschedules. /boots then shows
+#           one pod with many boots.
+#
+# The trap worth triggering on purpose: mode=shared with a ReadWriteOnce disk.
+# Scale past one replica and the extra pods hang forever with a Multi-Attach
+# error, because an Azure Disk attaches to exactly one node. See docs/LABS.md.
+# =============================================================================
+storage:
+  mode: shared # none | shared | perPod
+
+  # Mounted here in the container; the app writes everything under it.
+  mountPath: /data
+
+  size: 2Gi
+
+  # Empty string ("") uses the default StorageClass of the cluster. The AKS
+  # built-ins are:
+  #   managed-csi            Azure Disk, Standard SSD, RWO, expandable
+  #   managed-csi-premium    Azure Disk, Premium SSD, RWO, expandable
+  #   azurefile-csi          Azure Files, Standard, RWX, expandable
+  #   azurefile-csi-premium  Azure Files, Premium, RWX, expandable
+  # List what you actually have:  kubectl get storageclass
+  className: azurefile-csi
+
+  # Must match what the class can do. RWX only works on Azure Files; an Azure
+  # Disk is RWO and will refuse to mount on a second node.
+  accessModes:
+    - ReadWriteMany
+
+  # Keep the PVC - and the Azure resource behind it - when the Helm release or
+  # the Argo CD Application is deleted. Turn it off in a lab you throw away
+  # often, or you will be deleting disks by hand in the portal. Note that with
+  # this on, Argo CD also stops pruning the PVC.
+  retainOnDelete: true
+
+  # Mount a subdirectory of the volume instead of its root. On a shared volume
+  # this is how you give each release its own space on one file share.
+  subPath: ""
+
+  # emptyDir cap - only used when mode = none.
+  emptyDirSizeLimit: 1Gi
+
+  # ---- perPod (StatefulSet) only ------------------------------------------
+  perPod:
+    # What happens to the per-pod PVCs when you scale down or delete the
+    # StatefulSet (Kubernetes 1.27+). The Retain/Retain default is why scaling
+    # a StatefulSet down and back up hands the pod its old data back.
+    claimRetention:
+      whenDeleted: Retain # Retain | Delete
+      whenScaled: Retain # Retain | Delete
+    # Parallel starts every pod at once; OrderedReady does 0, then 1, then 2.
+    # OrderedReady makes scale-up slow, and therefore easy to watch.
+    podManagementPolicy: OrderedReady
+
+# ---- optional: your own StorageClass ---------------------------------------
+# Off by default, because the AKS built-ins are enough to start with. Turn it on
+# for the volume-expansion lab, or when a File share has to be writable by a
+# non-root container: cifs ignores fsGroup, so the uid/gid must be a mount
+# option instead.
+storageClass:
+  create: false
+  name: demo-app-files
+  provisioner: file.csi.azure.com # or disk.csi.azure.com
+  parameters:
+    skuName: Standard_LRS
+  reclaimPolicy: Delete # Delete | Retain
+  allowVolumeExpansion: true
+  volumeBindingMode: Immediate # Azure Files. Use WaitForFirstConsumer for disks.
+  mountOptions:
+    - dir_mode=0777
+    - file_mode=0777
+    - uid=1000
+    - gid=1000
+    - mfsymlinks
+    - cache=strict
+    - actimeo=30
+
+# ------------------------------------------------------------------ app config
+# These become environment variables in the container (see configmap-env.yaml).
+app:
+  environment: dev
+  port: 8080
+
+  # Background log emission, lines per second per pod.
+  # Runtime override without a redeploy:  curl "$URL/lograte?rps=50"
+  logRate: 2
+
+  # Seconds before /readyz starts returning 200.
+  startupDelaySeconds: 3
+
+  # On SIGTERM the app fails readiness, keeps serving for this long, then exits.
+  # Keep it below terminationGracePeriodSeconds or the kubelet SIGKILLs you.
+  shutdownDelaySeconds: 5
+
+  # Extra env vars, e.g. - name: FOO
+  #                        value: bar
+  extraEnv: []
+
+# ---------------------------------------------------------------------- service
+service:
+  type: ClusterIP # ClusterIP | LoadBalancer | NodePort
+  port: 80
+  annotations: {}
+  # For an internal AKS load balancer:
+  #   service.beta.kubernetes.io/azure-load-balancer-internal: "true"
+
+# ------------------------------------------------------------------ gateway api
+# The way in. There is no Ingress in this chart, and no Gateway either - the
+# chart only publishes a route to a Gateway you already run.
+#
+# Find the one to attach to:
+#   kubectl get gateway -A
+#   kubectl get gateway <name> -n <ns> -o yaml   # check its listeners
+httpRoute:
+  # On by default so an Argo CD Application created in the UI - which loads
+  # values.yaml and nothing else - still publishes a route.
+  enabled: true
+  annotations: {}
+
+  # The existing Gateway to attach to.
+  #
+  # `namespace` matters here: a shared platform Gateway usually lives somewhere
+  # else (default, or a gateway/istio-system namespace) while this release lives
+  # in demo-dev. Leave it empty ONLY when the Gateway is in the same namespace
+  # as the release - otherwise the reference resolves to nothing, quietly.
+  #
+  # `sectionName` empty means "attach to every listener that will accept me",
+  # which for a Gateway with an HTTP and an HTTPS listener gets you both. That
+  # is normally right: port 80 has to stay reachable for ACME HTTP-01 renewals.
+  parentRefs:
+    - name: platform-gateway
+      namespace: default
+      sectionName: ""
+
+  # Must intersect the listener hostname on the Gateway, or the route is
+  # rejected. An empty list matches EVERY hostname the listener accepts, which
+  # on a shared Gateway means this route quietly swallows other apps traffic -
+  # almost never what you want.
+  hostnames:
+    - demoapp.websolutsg.co.uk
+
+  # Optional. Used only when `rules` below is empty. Leave it empty and the rule
+  # matches every path, which is what you want for a whole-hostname route.
+  matches: []
+  #  - path:
+  #      type: PathPrefix
+  #      value: /
+
+  # Per-rule timeouts - something Ingress never had without controller-specific
+  # annotations. Useful against this app: /slow?ms=30000 will breach them.
+  timeouts: {}
+  #  request: 15s
+  #  backendRequest: 10s
+
+  # Request/response filters. This is the part that replaces the pile of
+  # controller-specific annotations you needed with Ingress.
+  filters: []
+  #  - type: RequestHeaderModifier
+  #    requestHeaderModifier:
+  #      add:
+  #        - name: X-Lab
+  #          value: "true"
+  #  - type: URLRewrite
+  #    urlRewrite:
+  #      path:
+  #        type: ReplacePrefixMatch
+  #        replacePrefixMatch: /
+
+  # Weighted traffic splitting between this release and another Service. Deploy
+  # a second release and send it a slice of the traffic. Weights are relative.
+  canary:
+    enabled: false
+    serviceName: "" # e.g. demo-app-canary
+    port: 0 # 0 = same as service.port
+    weight: 10 # 10 of 100 -> ~10% to the canary
+
+  # Full control: if set, this REPLACES the generated rule entirely and
+  # matches/filters/timeouts/canary above are ignored. Use it for header-based
+  # routing, multiple paths, mirroring, or cross-service fan-out.
+  rules: []
+  #  - matches:
+  #      - headers:
+  #          - name: x-canary
+  #            value: "always"
+  #    backendRefs:
+  #      - name: demo-app-canary
+  #        port: 80
+
+# -------------------------------------------------------------------- resources
+# requests are what the scheduler and the HPA use. The CPU HPA target is a
+# percentage OF THE REQUEST, so a small request makes scaling easy to trigger.
+resources:
+  requests:
+    cpu: 10m
+    memory: 64Mi
+  limits:
+    # No CPU limit on purpose: with a limit the container gets throttled instead
+    # of showing high utilisation, which makes HPA experiments read strangely.
+    memory: 256Mi
+
+# ------------------------------------------------------------------ autoscaling
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 8
+  targetCPUUtilizationPercentage: 60
+  targetMemoryUtilizationPercentage: 0 # 0 = disabled
+  # Scale-up/scale-down pacing (autoscaling/v2), deliberately snappier than the
+  # Kubernetes defaults so an exercise does not take five minutes.
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 15
+        - type: Pods
+          value: 4
+          periodSeconds: 15
+      selectPolicy: Max
+    scaleDown:
+      stabilizationWindowSeconds: 60
+      policies:
+        - type: Percent
+          value: 50
+          periodSeconds: 30
+
+# --------------------------------------------------------------------- rollouts
+# Only used by the Deployment (storage.mode none / shared). The StatefulSet uses
+# its own RollingUpdate strategy with a partition, set below.
+strategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxSurge: 1
+    maxUnavailable: 0
+
+# StatefulSet-only rollout control. partition: 2 means "only update pods with
+# ordinal >= 2" - a canary you drive by lowering a number.
+statefulSetUpdate:
+  type: RollingUpdate # RollingUpdate | OnDelete
+  partition: 0
+
+terminationGracePeriodSeconds: 30
+
+# preStop sleep gives kube-proxy time to stop sending new connections before the
+# process shuts down. Classic fix for 502s during deploys.
+lifecycle:
+  preStopSleepSeconds: 5
+
+# ----------------------------------------------------------------------- probes
+probes:
+  startup:
+    enabled: true
+    path: /healthz
+    initialDelaySeconds: 0
+    periodSeconds: 2
+    failureThreshold: 30 # 30 * 2s = 60s to start before it gets killed
+  readiness:
+    enabled: true
+    path: /readyz
+    periodSeconds: 5
+    timeoutSeconds: 2
+    failureThreshold: 3
+  liveness:
+    enabled: true
+    path: /healthz
+    periodSeconds: 10
+    timeoutSeconds: 2
+    failureThreshold: 3
+
+# ------------------------------------------------------------------- scheduling
+nodeSelector:
+  kubernetes.io/os: linux
+
+tolerations: []
+affinity: {}
+
+# Prefer not to stack replicas on one node. Leave this on for the shared-volume
+# mode: replicas landing on different nodes is what proves RWX actually works.
+podAntiAffinity:
+  enabled: true
+  type: preferred # preferred | required
+
+topologySpreadConstraints: []
+
+# ---------------------------------------------------- disruption + permissions
+podDisruptionBudget:
+  enabled: false
+  minAvailable: 1
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+  # For Azure Workload Identity:
+  #   azure.workload.identity/client-id: <client-id>
+automountServiceAccountToken: false
+
+# ------------------------------------------------------------------- hardening
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  # fsGroup makes the kubelet chown the volume so uid 1000 can write to it. That
+  # works for an Azure Disk (ext4). It does NOT work for Azure Files (cifs) -
+  # there the uid/gid have to be StorageClass mountOptions instead. Getting this
+  # wrong is the most common cause of a read-only volume on AKS.
+  fsGroup: 1000
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  # The root filesystem is read-only. The app writes only to the data volume and
+  # /tmp, both mounted separately.
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+# ------------------------------------------------------------------ monitoring
+# Needs the Prometheus Operator CRDs (Azure Managed Prometheus or
+# kube-prometheus-stack). Off by default so `helm template` never breaks.
+serviceMonitor:
+  enabled: false
+  interval: 30s
+  labels: {}
+
+podAnnotations: {}
+podLabels: {}
+commonLabels: {}

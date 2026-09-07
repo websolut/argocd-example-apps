@@ -1,0 +1,79 @@
+# Argo CD Application - demo-app in per-pod (StatefulSet) storage mode
+#
+#   kubectl apply -f demo/argocd/application-perpod.yaml
+#
+# Deployed to its own namespace so it can run alongside the dev Application and
+# you can compare the two side by side:
+#
+#   kubectl -n demo-dev    get deploy,pvc
+#   kubectl -n demo-perpod get statefulset,pvc
+#
+# Manual sync, not automated. That is deliberate for a stateful workload: you
+# want to see the diff before something reattaches a disk on your behalf.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: demo-app-perpod
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+
+  source:
+    repoURL: https://github.com/websolut/argocd-example-apps.git
+    targetRevision: master
+    path: demo
+    helm:
+      releaseName: demo-app
+      valueFiles:
+        - values.yaml
+        - values-perpod.yaml
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: demo-perpod
+
+  syncPolicy:
+    # No `automated:` block, so nothing syncs until you press Sync or run
+    # `argocd app sync demo-app-perpod`.
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+      # Argo CD deletes resources in reverse dependency order; PruneLast holds
+      # the PVCs until the pods that mount them are actually gone. Without it a
+      # prune can block on a volume still attached to a terminating pod.
+      - PruneLast=true
+
+  revisionHistoryLimit: 10
+
+  ignoreDifferences:
+    - group: apps
+      kind: StatefulSet
+      jsonPointers:
+        - /spec/replicas
+
+  # ---------------------------------------------------------------------------
+  # The thing that will bite you here, so know it in advance:
+  #
+  # A StatefulSet volumeClaimTemplates block is IMMUTABLE. Change storage.size
+  # from 4Gi to 8Gi in git and the sync fails with
+  #
+  #   StatefulSet.apps is invalid: spec: Forbidden: updates to statefulset spec
+  #   for fields other than replicas, template, updateStrategy,
+  #   persistentVolumeClaimRetentionPolicy and minReadySeconds are forbidden
+  #
+  # Growing per-pod volumes is a three-step manual job, not a git edit:
+  #
+  #   1. kubectl delete statefulset demo-app -n demo-perpod --cascade=orphan
+  #      (the pods and PVCs stay; only the controller object goes)
+  #   2. kubectl patch pvc data-demo-app-0 -n demo-perpod \
+  #        -p '{"spec":{"resources":{"requests":{"storage":"8Gi"}}}}'
+  #      repeated per claim - they are separate volumes, so they resize
+  #      separately
+  #   3. update storage.size in git and sync, which recreates the StatefulSet
+  #      and adopts the existing pods and claims
+  #
+  # This is the real reason people say stateful workloads on Kubernetes are
+  # harder: the scaling story is fine, it is the RESIZING story that is manual.
+  # ---------------------------------------------------------------------------

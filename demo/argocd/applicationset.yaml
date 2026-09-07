@@ -1,16 +1,25 @@
-# Optional: one ApplicationSet instead of one Application per environment.
+# Optional: one ApplicationSet instead of an Application per storage mode.
 #
-# Argo CD generates a child Application for each entry in the list generator.
-# Adding an environment then means adding four lines here.
+#   kubectl apply -f demo/argocd/applicationset.yaml
 #
-#   kubectl apply -f argocd/applicationset.yaml
+# Argo CD generates a child Application for each element in the list generator,
+# so this stands up all three storage modes side by side in three namespaces -
+# which is the fastest way to compare them:
+#
+#   kubectl -n demo-ephemeral get pods                  # no PVC at all
+#   kubectl -n demo-shared    get deploy,pvc            # one PVC, many pods
+#   kubectl -n demo-perpod    get statefulset,pvc       # one PVC per pod
 #
 # Use EITHER this file OR the application-*.yaml files - not both, or two
-# controllers will manage the same releases.
+# controllers end up managing the same releases.
+#
+# Be aware of the cost before you apply it: the shared and perPod children
+# provision real Azure resources, and with minReplicas 2 the perPod child
+# creates two managed disks immediately.
 apiVersion: argoproj.io/v1alpha1
 kind: ApplicationSet
 metadata:
-  name: lab-app
+  name: demo-app
   namespace: argocd
 spec:
   goTemplate: true
@@ -18,43 +27,53 @@ spec:
   generators:
     - list:
         elements:
-          - env: dev
-            namespace: lab-dev
-          - env: prod
-            namespace: lab-prod
+          - mode: ephemeral
+            namespace: demo-ephemeral
+          - mode: shared
+            namespace: demo-shared
+          - mode: perpod
+            namespace: demo-perpod
   template:
     metadata:
-      name: 'lab-app-{{ .env }}'
+      name: 'demo-app-{{ .mode }}'
     spec:
       project: default
       source:
-        repoURL: https://github.com/YOUR-ORG/aks-lab.git
-        targetRevision: main
-        path: charts/lab-app
+        repoURL: https://github.com/websolut/argocd-example-apps.git
+        targetRevision: master
+        path: demo
         helm:
-          releaseName: lab-app
+          releaseName: demo-app
           valueFiles:
             - values.yaml
-            - 'values-{{ .env }}.yaml'
+            - 'values-{{ .mode }}.yaml'
       destination:
         server: https://kubernetes.default.svc
         namespace: '{{ .namespace }}'
       syncPolicy:
-        # Every generated Application gets the same policy. If you want dev to
-        # auto-sync and prod to be gated, use the two application-*.yaml files
-        # instead, or add a templatePatch here.
+        # Every generated Application gets the same policy. If you want the
+        # stateful one gated behind a manual sync - which is the sensible
+        # default for anything holding data - use the two application-*.yaml
+        # files instead, or add a templatePatch here.
         automated:
           prune: true
           selfHeal: true
         syncOptions:
           - CreateNamespace=true
           - ServerSideApply=true
+          - PruneLast=true
       ignoreDifferences:
         - group: apps
           kind: Deployment
           jsonPointers:
             - /spec/replicas
-  # Do not delete generated Applications when an element disappears; you must
-  # remove them yourself. Drop this to get full lifecycle management.
+        - group: apps
+          kind: StatefulSet
+          jsonPointers:
+            - /spec/replicas
+  # Do not delete generated Applications when an element disappears from the
+  # list - you remove them yourself. For a chart that owns PersistentVolumes
+  # this is the safer default: an accidental edit to the generator should not
+  # cascade into deleted claims. Drop it to get full lifecycle management.
   syncPolicy:
     preserveResourcesOnDeletion: true

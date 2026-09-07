@@ -1,6 +1,11 @@
-# Keep LF in the working tree on Windows too.
+# Keep LF in the working tree, on Windows too.
 #
-# app.py is read verbatim by `.Files.Get` and embedded in a ConfigMap, and
-# load.sh runs on Linux - CRLF in either one causes odd, hard-to-spot failures.
+# This is not cosmetic here. app.py is read verbatim by `.Files.Get` and
+# embedded into a ConfigMap, so CRLF line endings end up inside the rendered
+# manifest - which changes the ConfigMap checksum on every checkout, makes Argo
+# CD permanently OutOfSync, and can break the shebang. load.sh runs on Linux
+# and has the same problem.
 * text=auto eol=lf
+
+# ...except the PowerShell script, which is meant to be edited on Windows.
 *.ps1 text eol=crlf

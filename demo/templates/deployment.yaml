@@ -1,0 +1,39 @@
+{{- if not (include "demo-app.isStateful" .) }}
+{{- include "demo-app.validateStorage" . }}
+{{/*
+Used for storage.mode = none and storage.mode = shared.
+
+Every replica of a Deployment is interchangeable and they all mount the SAME
+volume, so this only works when the volume can be shared (ReadWriteMany) or
+does not matter (emptyDir). For one volume per pod you need the StatefulSet in
+statefulset.yaml - switch with storage.mode = perPod.
+*/}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "demo-app.fullname" . }}
+  labels:
+    {{- include "demo-app.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  {{- /*
+    When the HPA owns the replica count we must NOT render replicas at all.
+    Otherwise Helm and Argo CD keep resetting it to the chart value and fight
+    the HPA, so the pod count flaps forever. This is the most common
+    GitOps-plus-autoscaling bug there is.
+  */}}
+  revisionHistoryLimit: 5
+  strategy:
+    type: {{ .Values.strategy.type }}
+    {{- if eq .Values.strategy.type "RollingUpdate" }}
+    rollingUpdate:
+      {{- toYaml .Values.strategy.rollingUpdate | nindent 6 }}
+    {{- end }}
+  selector:
+    matchLabels:
+      {{- include "demo-app.selectorLabels" . | nindent 6 }}
+  template:
+    {{- include "demo-app.podTemplate" . | nindent 4 }}
+{{- end }}

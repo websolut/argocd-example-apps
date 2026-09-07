@@ -1,0 +1,26 @@
+{{/*
+Runtime configuration as environment variables.
+
+The pod template carries a checksum annotation over this file, so editing a
+value here rolls the pods. Change something and watch kubectl rollout status.
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "demo-app.fullname" . }}-env
+  labels:
+    {{- include "demo-app.labels" . | nindent 4 }}
+data:
+  APP_NAME: {{ include "demo-app.name" . | quote }}
+  APP_VERSION: {{ .Chart.AppVersion | quote }}
+  ENVIRONMENT: {{ .Values.app.environment | quote }}
+  PORT: {{ .Values.app.port | quote }}
+  LOG_RATE: {{ .Values.app.logRate | quote }}
+  STARTUP_DELAY_SECONDS: {{ .Values.app.startupDelaySeconds | quote }}
+  SHUTDOWN_DELAY_SECONDS: {{ .Values.app.shutdownDelaySeconds | quote }}
+  # The app reads these two so /info and /metrics can report what kind of
+  # volume it is actually sitting on, without needing cluster access.
+  DATA_DIR: {{ .Values.storage.mountPath | quote }}
+  STORAGE_MODE: {{ .Values.storage.mode | quote }}
+  PYTHONUNBUFFERED: "1"
+  PYTHONDONTWRITEBYTECODE: "1"

@@ -1,0 +1,42 @@
+{{- if .Values.storageClass.create }}
+{{/*
+Your own StorageClass. Off by default, because the AKS built-in classes are
+enough to get started. Turn it on when you want to control the two things the
+built-ins have already decided for you:
+
+  allowVolumeExpansion  whether a PVC can be grown in place at all
+  mountOptions          for Azure Files, the only way to make a share writable
+                        by a non-root container, because cifs ignores fsGroup
+
+The fields that matter on a StorageClass are immutable. To change parameters you
+create a new class and a new PVC - you cannot edit one in place.
+*/}}
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: {{ .Values.storageClass.name }}
+  labels:
+    {{- include "demo-app.labels" . | nindent 4 }}
+  annotations:
+    # Never prune a StorageClass on an Application delete: PVCs in other
+    # namespaces may be bound through it, and removing it breaks their
+    # expansion.
+    argocd.argoproj.io/sync-options: Prune=false
+provisioner: {{ .Values.storageClass.provisioner }}
+{{- with .Values.storageClass.parameters }}
+parameters:
+  {{- toYaml . | nindent 2 }}
+{{- end }}
+# Delete removes the Azure resource when the PV goes away. Retain keeps it and
+# leaves the PV in Released, which you then clean up yourself.
+reclaimPolicy: {{ .Values.storageClass.reclaimPolicy }}
+allowVolumeExpansion: {{ .Values.storageClass.allowVolumeExpansion }}
+# WaitForFirstConsumer delays provisioning until a pod is scheduled, so the disk
+# is created in the zone the pod landed in. For zonal Azure Disks that is what
+# stops a pod being permanently unschedulable because its disk is elsewhere.
+volumeBindingMode: {{ .Values.storageClass.volumeBindingMode }}
+{{- with .Values.storageClass.mountOptions }}
+mountOptions:
+  {{- toYaml . | nindent 2 }}
+{{- end }}
+{{- end }}

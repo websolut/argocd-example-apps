@@ -1,363 +1,390 @@
-# Guided labs
+# demo-app labs
 
-Each lab is self-contained and takes 5–15 minutes. Everything assumes:
+Nine exercises. Each one has a thing to do, a thing to watch, and the point of
+having done it. They build on each other, so go in order the first time.
 
-```powershell
-$NS = "lab-dev"
-kubectl -n $NS port-forward svc/lab-app 8080:80   # leave this running in one terminal
-```
-
-Keep a second terminal on the logs and a third on the pods:
+Throughout, `$URL` is however you are reaching the app. The simplest option:
 
 ```powershell
-kubectl -n $NS logs -l app.kubernetes.io/name=lab-app -f --prefix --tail=20
-kubectl -n $NS get pods -w
+kubectl -n demo-dev port-forward svc/demo-app 8080:80
+# then, in another terminal
+$URL = "http://localhost:8080"
 ```
+
+A port-forward always targets **one** pod, which matters from lab 3 onwards. To
+spread requests across replicas the way a Service does, drive it from inside the
+cluster instead:
+
+```powershell
+kubectl -n demo-dev run curl --rm -it --image=curlimages/curl --restart=Never -- sh
+# then from that shell: curl http://demo-app/info
+```
+
+Two terminals is the right setup for all of these: one running a `-w` watch, one
+issuing the curl that makes something happen.
 
 ---
 
-## Lab 1 — Manual scaling and how a Service load-balances
+## Lab 1 - Nothing persists (storage.mode = none)
 
-1. Set `replicaCount: 3` in `charts/lab-app/values-dev.yaml`, commit, push.
-2. Watch Argo CD notice it (up to 3 minutes on the default poll, or press
-   **Refresh** in the UI / `argocd app get lab-app-dev --refresh`).
-3. Hit the app repeatedly and watch the pod name change:
-   ```powershell
-   1..20 | ForEach-Object { (curl -s localhost:8080/info | ConvertFrom-Json).pod }
-   ```
-   *Note:* a `port-forward` targets **one** pod, so you will see a single name.
-   Run `kubectl -n $NS run curl --rm -it --image=curlimages/curl -- sh` and curl
-   `http://lab-app/info` from inside the cluster to see real balancing.
-4. Now try `kubectl -n $NS scale deploy/lab-app --replicas=1`. With
-   `selfHeal: true`, Argo CD puts it back within seconds. That is the whole
-   point of GitOps — the cluster is not the source of truth.
+Deploy the ephemeral overlay and prove to yourself what you are missing.
 
-**Takeaway:** manual `kubectl scale` is a debugging tool, not a deployment
-mechanism. And a Service load-balances per *connection*, not per request.
+```powershell
+helm upgrade --install demo-app demo `
+  -f demo/values.yaml -f demo/values-ephemeral.yaml `
+  -n demo-dev --create-namespace
+```
+
+Write something, then look at the baseline:
+
+```powershell
+curl "$URL/write?mb=16"      # note duration_ms and throughput_mb_s
+curl "$URL/ls"               # your file is there
+curl "$URL/boots"            # boots_recorded: 1
+```
+
+Now kill the **process**, which restarts the container inside the same pod:
+
+```powershell
+curl "$URL/crash"
+kubectl -n demo-dev get pods       # RESTARTS went up by 1, pod name unchanged
+# re-establish the port-forward, then:
+curl "$URL/ls"                     # your file is STILL THERE
+curl "$URL/boots"                  # boots_recorded: 2
+```
+
+That is not the failure you were expecting. Now delete the **pod**:
+
+```powershell
+kubectl -n demo-dev delete pod -l app.kubernetes.io/name=demo-app
+kubectl -n demo-dev get pods -w    # a new pod, with a new name
+# re-establish the port-forward, then:
+curl "$URL/ls"                     # empty
+curl "$URL/boots"                  # back to 1
+```
+
+**The point.** An `emptyDir` is scoped to the **pod**, not the container, so a
+crash-and-restart keeps the data and a pod replacement destroys it. Those are
+two different events that both get called "a restart" in conversation, and
+telling them apart is most of the skill here. A `Deployment` rollout, a node
+drain, an eviction and a scale-down all replace pods - so in practice, on a real
+cluster, `emptyDir` data is gone constantly.
+
+Also worth a look: `curl "$URL/df"` reports the size of the **node** disk, not
+the 512Mi you set. `emptyDir.sizeLimit` is a quota that gets your pod evicted
+when you cross it, not a filesystem boundary the app can see. That one surprises
+people, and it means a runaway `/fill` on `emptyDir` fills the node, not a
+volume - which is why `mode: none` is the one mode where you should not run
+lab 7.
 
 ---
 
-## Lab 2 — Horizontal Pod Autoscaler
-
-Autoscaling is already enabled in `values-dev.yaml` (2–8 pods, 60% CPU).
+## Lab 2 - A real volume that survives (storage.mode = shared)
 
 ```powershell
-kubectl -n $NS get hpa lab-app -w      # terminal A
-curl "http://localhost:8080/burn?seconds=240&workers=2"
+helm upgrade --install demo-app demo `
+  -f demo/values.yaml -f demo/values-shared.yaml `
+  -n demo-dev
 ```
 
-Watch `TARGETS` climb past 60% and `REPLICAS` follow. Then:
+Check the claim **before** you check the pods:
 
 ```powershell
-kubectl -n $NS describe hpa lab-app    # read the Events at the bottom
+kubectl -n demo-dev get pvc
+kubectl -n demo-dev get pv
+kubectl -n demo-dev describe pvc demo-app-data
 ```
 
-Things to try:
+You want `STATUS: Bound`. If it says `Pending`, read the Events at the bottom of
+`describe` - that message is the answer, and 90% of the time it is either "no
+such StorageClass" or an access mode the class cannot provide.
 
-- **Why does scale-down take a minute?** `behavior.scaleDown.stabilizationWindowSeconds`
-  in `values.yaml` is 60s. Kubernetes defaults to 300s to avoid thrashing. Change
-  it and observe.
-- **Why did it only scale to 8?** `maxReplicas`. Raise it and burn again.
-- **Break it on purpose:** delete the `resources.requests.cpu` value. The HPA has
-  nothing to compute a percentage against and reports `<unknown>`. This is the
-  #1 reason a CPU HPA silently does nothing.
-- **Memory target:** set `autoscaling.targetMemoryUtilizationPercentage: 70` and
-  drive it with `/mem?mb=200&seconds=300`. Notice memory scaling is a worse
-  signal — memory does not fall when load falls, so it scales up and stays up.
-- **Scale below min:** the HPA will not let you go under `minReplicas`.
+Now repeat the part of lab 1 that actually destroyed data - deleting the pod,
+not just crashing the process:
 
-**Takeaway:** the HPA target is a percentage of the *request*, not of the node
-or the limit. Requests are the unit of autoscaling.
+```powershell
+curl "$URL/df"               # fstype should be cifs - this is SMB, not a disk
+curl "$URL/write?mb=16"
+kubectl -n demo-dev delete pod -l app.kubernetes.io/name=demo-app
+# once the replacement is Ready and the port-forward is back:
+curl "$URL/ls"               # your file survived
+curl "$URL/boots"            # boots_recorded: 2, on a brand new pod
+```
+
+**The point.** `boots_recorded: 2` is the whole lesson in one integer. A pod
+that never existed when you wrote that file can read it back - the volume
+outlived the pod, which is the one thing `emptyDir` could not do.
+
+Compare `duration_ms` from `/write` here against lab 1 while you are at it.
+Network storage is slower, and now you know by how much on your cluster rather
+than in general.
 
 ---
 
-## Lab 3 — Sidecar containers
+## Lab 3 - One volume, many readers (RWX)
 
-Two patterns, both in the chart:
-
-```powershell
-helm upgrade --install lab-app charts/lab-app -n $NS `
-  -f charts/lab-app/values.yaml -f charts/lab-app/values-dev.yaml `
-  -f charts/lab-app/values-sidecar.yaml
-```
-
-(or add `values-sidecar.yaml` to `valueFiles` in the Argo CD Application.)
+Still on `values-shared.yaml`. Scale up and ask every replica the same question.
 
 ```powershell
-kubectl -n $NS get pods                  # READY now shows 3/3
-kubectl -n $NS logs <pod> -c app         # the application
-kubectl -n $NS logs <pod> -c log-tailer  # same lines, prefixed [tailer]
-kubectl -n $NS logs <pod> -c heartbeat   # the native sidecar
-kubectl -n $NS describe pod <pod>        # heartbeat is under Init Containers
+kubectl -n demo-dev scale deploy/demo-app --replicas=4
+kubectl -n demo-dev get pods -o wide      # note the NODE column
 ```
 
-What is going on:
+The pods should be on different nodes (that is what `podAntiAffinity` is for).
+Now, from inside the cluster so the Service load-balances:
 
-- **`log-tailer`** is the *classic* streaming sidecar: a normal entry under
-  `spec.containers`. The app writes to `/var/log/app/app.log` on a shared
-  `emptyDir`; the sidecar tails that file to its own stdout. Every container in a
-  pod shares the network namespace and any volumes you mount into both — that is
-  the entire mechanism behind sidecars.
-- **`heartbeat`** is a *native* sidecar (Kubernetes 1.29+): an `initContainer`
-  with `restartPolicy: Always`. Look at the ordering — it is running *before*
-  the app container starts, and it is terminated *after* the app exits. That
-  ordering guarantee is why log shippers and service-mesh proxies moved to this
-  shape; a classic sidecar can start too late or die too early.
+```powershell
+kubectl -n demo-dev run curl --rm -it --image=curlimages/curl --restart=Never -- `
+  sh -c 'for i in 1 2 3 4 5 6 7 8; do curl -s http://demo-app/boots | grep -E "pod|boots_recorded"; done'
+```
 
-Things to try:
+**The point.** Every replica reports the same `boots_recorded`, and
+`distinct_pods_seen` lists all four pod names - from four pods, on different
+nodes, writing to one Azure Files share simultaneously. That is what
+ReadWriteMany buys you, and it is the only storage mode a `Deployment` with an
+HPA can use without breaking.
 
-- Kill just the sidecar: `kubectl -n $NS exec <pod> -c log-tailer -- kill 1`.
-  The pod is not recreated — only that container restarts, and `RESTARTS` counts
-  it. Pods are the scheduling unit; containers restart independently.
-- Watch the shared network namespace: exec into `log-tailer` and
-  `wget -qO- localhost:8080/info` — `localhost` reaches the app container.
-- Add your own via `extraContainers` in `values-sidecar.yaml`.
-
-**Takeaway:** a sidecar is just another container in the same pod, sharing
-network and volumes. Prefer native sidecars for anything that must outlive or
-predate the main container.
+Try `curl "$URL/write?mb=8&name=data/shared.bin"` against one pod and `/ls` on
+another: the file appears everywhere.
 
 ---
 
-## Lab 4 — Probes: readiness vs liveness
+## Lab 4 - The Multi-Attach trap (do this on purpose)
 
-They are constantly confused. Prove the difference to yourself.
-
-**Readiness** — removes the pod from the Service, does not restart it:
+The most common AKS storage bug, deliberately reproduced.
 
 ```powershell
-curl "http://localhost:8080/toggle?what=ready&value=false"
-kubectl -n $NS get pods            # READY 0/1, RESTARTS unchanged
-kubectl -n $NS get endpointslices -l kubernetes.io/service-name=lab-app -o yaml
-curl "http://localhost:8080/toggle?what=ready&value=true"
+helm upgrade --install demo-app-trap demo `
+  -f demo/values.yaml -f demo/values-rwo-trap.yaml `
+  -n demo-trap --create-namespace
+kubectl -n demo-trap get pods -w
 ```
 
-**Liveness** — kills and restarts the container:
+One pod goes `Running`. The other two sit in `ContainerCreating` and stay there.
 
 ```powershell
-curl "http://localhost:8080/toggle?what=health&value=false"
-kubectl -n $NS get pods -w         # RESTARTS goes to 1 after ~30s
-kubectl -n $NS describe pod <pod>  # Events: "Liveness probe failed", "Killing"
+kubectl -n demo-trap describe pod -l app.kubernetes.io/name=demo-app | Select-String -Pattern "Multi-Attach" -Context 0,4
+kubectl -n demo-trap get events --sort-by=.lastTimestamp | Select-Object -Last 15
 ```
 
-**Crash loop** — see the exponential backoff:
+You are looking for:
 
-```powershell
-curl http://localhost:8080/crash
-kubectl -n $NS get pods -w         # Error -> CrashLoopBackOff, 10s, 20s, 40s...
+```
+Multi-Attach error for volume "pvc-..."
+Volume is already exclusively attached to one node and cannot be attached to another
 ```
 
-**Startup probe** — set `app.startupDelaySeconds: 45` while
-`probes.startup.failureThreshold: 30` (60s budget) and redeploy: the pod starts
-fine. Now set `probes.startup.enabled: false` and redeploy: the liveness probe
-kills it before it ever finishes booting. That is what a startup probe is for.
+**The point.** `ReadWriteOnce` constrains the **node**, not the pod. Two pods on
+the *same* node share an RWO volume perfectly well - which is exactly why this
+bug hides on a single-node dev cluster and appears the day the cluster grows or
+a node gets drained. The `podAntiAffinity: required` in that overlay is there to
+guarantee the failure instead of leaving it to the scheduler.
 
-**Takeaway:** readiness controls *traffic*, liveness controls *restarts*, startup
-buys *boot time*. A liveness probe that is too aggressive turns a slow app into a
-crash loop.
+Note too that nothing is "broken" from the autoscaler's point of view: the
+Deployment scaled to 3, the HPA is satisfied, `kubectl get deploy` shows 1/3
+ready. The controller did its job; the storage could not follow.
+
+Clean up: `helm uninstall demo-app-trap -n demo-trap`
 
 ---
 
-## Lab 5 — Rolling updates and graceful shutdown
+## Lab 5 - One volume per pod (StatefulSet)
 
 ```powershell
-# terminal A - continuous requests from inside the cluster
-kubectl -n $NS run load --rm -it --image=curlimages/curl -- `
-  sh -c 'while true; do curl -s -o /dev/null -w "%{http_code} " http://lab-app/info; sleep 0.2; done'
+helm uninstall demo-app -n demo-dev      # Deployment -> StatefulSet needs a delete
+helm upgrade --install demo-app demo `
+  -f demo/values.yaml -f demo/values-perpod.yaml `
+  -n demo-dev
+kubectl -n demo-dev get pods,pvc -w
 ```
 
-Change `app.color` from `blue` to `green` in `values-dev.yaml`, commit, push, and
-watch. You should see zero non-200s, thanks to three settings working together:
+Watch the ordering: pod `demo-app-0` is created, its claim `data-demo-app-0` is
+provisioned and attached, it goes Ready, and only *then* does `demo-app-1`
+start. That is `podManagementPolicy: OrderedReady`.
 
-- `strategy.rollingUpdate.maxUnavailable: 0` — never drop below the current count
-- `lifecycle.preStopSleepSeconds: 5` — stop receiving new connections before shutdown
-- `app.shutdownDelaySeconds: 5` < `terminationGracePeriodSeconds: 30` — finish in-flight work
-
-Now break it deliberately: set `lifecycle.preStopSleepSeconds: 0` and
-`app.shutdownDelaySeconds: 0`, redeploy, and roll again. Connection errors
-appear, because pods stop serving before kube-proxy has finished removing them
-from every node's rules.
-
-Other things to try:
+Now address one specific replica through the headless Service:
 
 ```powershell
-kubectl -n $NS rollout status deploy/lab-app
-kubectl -n $NS rollout history deploy/lab-app
-kubectl -n $NS rollout undo deploy/lab-app     # Argo CD will re-sync it back!
+kubectl -n demo-dev run curl --rm -it --image=curlimages/curl --restart=Never -- `
+  sh -c 'curl -s http://demo-app-0.demo-app-headless/boots; curl -s http://demo-app-1.demo-app-headless/boots'
 ```
 
-That last one is worth doing: under GitOps, rollback means `git revert`, not
-`kubectl rollout undo`.
+**The point.** Each pod reports `distinct_pods_seen: 1` - its own name. Two pods,
+two disks, two independent histories. Write a file on pod 0 and it will *not*
+appear on pod 1. That is the correct shape for anything that owns its data
+(a database), and the wrong shape for anything that shares it.
 
-**Takeaway:** zero-downtime deploys are not the default. They come from
-`maxUnavailable: 0` plus a `preStop` delay plus an app that handles SIGTERM.
+Then delete a pod and watch the identity hold:
+
+```powershell
+kubectl -n demo-dev delete pod demo-app-0
+kubectl -n demo-dev get pods -w
+# once it is back:
+curl "$URL/boots"     # boots_recorded went up; distinct_pods_seen is still just demo-app-0
+```
+
+The replacement pod has the same name, the same DNS record and the same disk.
+Compare that to a Deployment, where the replacement gets a new random name and
+none of its predecessor's state.
 
 ---
 
-## Lab 6 — Logs
+## Lab 6 - Scale-down keeps the disks
+
+Still on the StatefulSet.
 
 ```powershell
-curl "http://localhost:8080/lograte?rps=200"       # 200 lines/sec/pod
-kubectl -n $NS logs -l app.kubernetes.io/name=lab-app --tail=5 --prefix
+kubectl -n demo-dev scale statefulset/demo-app --replicas=3
+kubectl -n demo-dev get pvc           # three claims
+kubectl -n demo-dev scale statefulset/demo-app --replicas=1
+kubectl -n demo-dev get pods          # one pod
+kubectl -n demo-dev get pvc           # STILL THREE CLAIMS
+kubectl -n demo-dev scale statefulset/demo-app --replicas=3
+curl "$URL/boots"                     # pod 2 remembers its old boots
 ```
 
-- Logs go to stdout; the kubelet writes them to the node's disk and rotates at
-  10Mi per container by default. `kubectl logs` reads those files, which is why
-  `kubectl logs` cannot show you anything from before the last rotation. Use
-  `--previous` to read the *previous* container instance after a restart.
-- Switch `app.logFormat: text` and redeploy. Container Insights and Loki can
-  parse the JSON form into fields; the text form has to be regex-parsed. Feel the
-  difference.
-- If Container Insights is enabled on the cluster, query it:
-  ```kusto
-  ContainerLogV2
-  | where PodNamespace == "lab-dev"
-  | where LogMessage.level == "ERROR"
-  | project TimeGenerated, PodName, LogMessage.msg
-  | take 50
-  ```
-- Turn the rate back down with `/lograte?rps=2` — log ingestion is billed per GB.
+**The point.** `persistentVolumeClaimRetentionPolicy.whenScaled: Retain` is why
+scaling a StatefulSet in does not destroy data - and also why it does not stop
+the bill. Those two Azure Disks kept existing, and kept being charged for, the
+whole time you were at one replica.
 
-**Takeaway:** stdout is the contract. Structured logs cost nothing extra to
-produce and save real money and time downstream.
+Set `whenScaled: Delete` in `values-perpod.yaml`, re-run the cycle, and watch
+the claims disappear on scale-in. Both settings are defensible. Only one of them
+is what people assume.
 
 ---
 
-## Lab 7 — Disruption, node drains and PDBs
+## Lab 7 - Fill it up
+
+A full volume is a different failure from a busy one, and no autoscaler fixes it.
 
 ```powershell
-helm upgrade lab-app charts/lab-app -n $NS `
-  -f charts/lab-app/values.yaml -f charts/lab-app/values-prod.yaml
-kubectl -n $NS get pdb
-kubectl get nodes
-kubectl drain <node> --ignore-daemonsets --delete-emptydir-data
+# terminal 1
+kubectl -n demo-dev exec -it demo-app-0 -- sh -c 'while true; do df -h /data; sleep 3; done'
+# terminal 2
+curl "$URL/df"
+curl "$URL/fill?percent=95"
 ```
 
-With `minAvailable: 2` and 3 replicas the drain proceeds one pod at a time. Set
-`minAvailable` equal to the replica count and try again — the drain blocks
-forever. That exact misconfiguration stalls real AKS node pool upgrades.
+Watch `df` climb, then check the logs for the failure:
 
 ```powershell
-kubectl uncordon <node>
+kubectl -n demo-dev logs demo-app-0 | Select-String -Pattern "volume full","write failed"
+curl "$URL/metrics" | Select-String -Pattern "demo_app_write_errors_total|demo_app_volume_used_bytes"
 ```
 
-**Takeaway:** a PDB constrains only *voluntary* disruption (drains, upgrades,
-cluster-autoscaler scale-in). It never protects against a crash or node failure,
-and set too tight it stops you upgrading at all.
+Then prove that scaling does not help:
+
+```powershell
+kubectl -n demo-dev scale statefulset/demo-app --replicas=4
+curl "$URL/write?mb=64"     # still fails on pod 0. New pods have new empty disks.
+```
+
+Clean up with `curl "$URL/rm?name=fill"`.
+
+**The point.** `ENOSPC` is not a capacity problem you solve with replicas. The
+HPA has no idea the volume is full - CPU is fine, memory is fine, the pod is
+Ready, and the app cannot do its job. This is why
+`demo_app_volume_used_bytes / demo_app_volume_bytes_total` belongs on a
+dashboard with an alert, and why `serviceMonitor.enabled` exists in this chart.
 
 ---
 
-## Lab 8 — Argo CD behaviours worth internalising
+## Lab 8 - Expand a volume in place
 
-- **Drift correction:** `kubectl -n $NS set env deploy/lab-app FOO=bar`, then
-  watch `selfHeal` revert it.
-- **Prune:** set `podDisruptionBudget.enabled: false`, push — Argo CD deletes the
-  PDB because `prune: true`. Without prune, removed resources linger forever.
-- **Diff before sync:** `argocd app diff lab-app-prod` on the manual-sync app.
-- **Sync waves:** add `argocd.argoproj.io/sync-wave: "-1"` as an annotation on
-  the ConfigMaps and watch the order in the UI.
-- **App of apps / ApplicationSet:** `kubectl apply -f argocd/applicationset.yaml`
-  generates both environments from one object (delete the individual
-  Applications first).
+Only possible when the StorageClass has `allowVolumeExpansion: true`. Check:
 
-**Takeaway:** Argo CD's job is to make the cluster match git, continuously. Every
-manual change you make is a change it will undo.
+```powershell
+kubectl get sc
+kubectl get sc managed-csi -o jsonpath='{.allowVolumeExpansion}'
+```
+
+For the **shared** mode (a plain PVC), expansion is a git edit - which is the
+whole promise of GitOps:
+
+```powershell
+# edit demo/values-shared.yaml: storage.size 5Gi -> 10Gi, commit, push
+argocd app sync demo-app-dev
+kubectl -n demo-dev get pvc -w        # watch capacity change with no pod restart
+curl "$URL/df"                        # the app sees the new size immediately
+```
+
+For the **per-pod** mode it is not, because `volumeClaimTemplates` is immutable.
+Try the git edit first so you see the error, then do it properly - the full
+recipe is in the comment block at the bottom of
+[../argocd/application-perpod.yaml](../argocd/application-perpod.yaml).
+
+**The point.** Expansion is online and cheap; shrinking is impossible; and the
+ergonomics differ sharply between a PVC you control and one a StatefulSet
+generates. Also note what expansion is *not*: it does not add IOPS in
+proportion, and on Azure Disk the performance tier is a separate axis from the
+size.
 
 ---
 
-## Lab 9 — Exposing the app with a Gateway API HTTPRoute
+## Lab 9 - HPA and storage together
 
-Ingress is frozen; HTTPRoute is what replaces it. The split matters: a
-**Gateway** is infrastructure (it owns a public IP, a platform team runs it),
-an **HTTPRoute** is application config (you own it, it attaches to their
-Gateway). This chart ships only the route — which is the correct division.
-
-First find out what you are attaching to:
+Back to the shared overlay, where autoscaling and persistence coexist.
 
 ```powershell
-kubectl get gatewayclass          # is a controller installed at all?
-kubectl get gateway -A            # PROGRAMMED=True and an ADDRESS = usable
+helm upgrade --install demo-app demo -f demo/values.yaml -f demo/values-shared.yaml -n demo-dev
+# terminal 1
+kubectl -n demo-dev get hpa,pods -w
+# terminal 2
+.\demo\scripts\load.ps1 -Url $URL -Seconds 240 -Concurrency 4
 ```
 
-The route is enabled in `values.yaml` by default — deliberately, so an Argo CD
-Application created through the UI (which loads `values.yaml` and nothing else)
-deploys it with no extra configuration. Set `httpRoute.parentRefs[0].name` and
-`httpRoute.hostnames` there to match your cluster, then:
+Watch the sequence: `TARGETS` climbs past 60%, replicas go up in steps
+(`scaleUp.policies` allows doubling or +4 pods every 15s), and the new pods all
+mount the same share. Then stop the load and wait - scale-down does nothing for
+60 seconds (`scaleDown.stabilizationWindowSeconds`) and then removes at most
+half the pods every 30 seconds.
 
 ```powershell
-helm upgrade --install labapp charts/lab-app -n default -f charts/lab-app/values.yaml
+kubectl -n demo-dev describe hpa demo-app | Select-Object -Last 20
 ```
 
-which renders exactly this:
-
-```yaml
-apiVersion: gateway.networking.k8s.io/v1
-kind: HTTPRoute
-metadata:
-  name: labapp
-  namespace: default
-spec:
-  hostnames:
-    - labapp.websolutsg.co.uk
-  parentRefs:
-    - name: platform-gateway
-  rules:
-    - backendRefs:
-        - name: labapp
-          port: 80
-```
-
-**The first thing to check is always attachment.** An HTTPRoute no Gateway
-accepted is silently inert — no error, no events on your side, just nothing:
+Now the GitOps part. While it is scaled up, try to make Argo CD fight it:
 
 ```powershell
-kubectl -n default describe httproute labapp
-# Parents -> Conditions: Accepted=True, ResolvedRefs=True is what you want
+argocd app get demo-app-dev            # should be Synced, not OutOfSync
 ```
 
-`Accepted=False` almost always means one of:
+It stays Synced for two independent reasons, and it is worth knowing both:
 
-- the Gateway's listener has `allowedRoutes.namespaces.from: Same` and your
-  route is in a different namespace — attachment is a **two-way handshake**,
-  unlike Ingress, and the Gateway owner has to opt you in
-- your `hostnames` do not intersect the listener's `hostname`
-- `sectionName` names a listener that does not exist
+1. The chart does not render `spec.replicas` at all when
+   `autoscaling.enabled` is true (see the comment in
+   [../templates/deployment.yaml](../templates/deployment.yaml)).
+2. The Application has `ignoreDifferences` on `/spec/replicas` as a backstop.
 
-`ResolvedRefs=False` means the backend Service name or port is wrong.
+Delete reason 1 - set `autoscaling.enabled: false` but leave the HPA object in
+the cluster - and you get the classic flapping loop: the HPA scales up, Argo CD
+self-heals it back down, forever. Worth doing once so you recognise it.
 
-Then try the things Ingress needed vendor-specific annotations for:
-
-- **Timeouts** — set `httpRoute.timeouts.request: 3s` and hit `/slow?ms=5000`.
-  You get a 504 from the gateway, no annotations involved.
-- **Header filters** — uncomment `httpRoute.filters`; the app echoes what it
-  received on `/env`.
-- **Traffic splitting** — deploy a second release and split traffic by weight:
-  ```powershell
-  # the canary release serves traffic but publishes no route of its own
-  helm upgrade --install labapp-canary charts/lab-app -n default `
-    -f charts/lab-app/values.yaml --set app.color=green --set httpRoute.enabled=false
-  helm upgrade labapp charts/lab-app -n default -f charts/lab-app/values.yaml `
-    --set httpRoute.canary.enabled=true --set httpRoute.canary.serviceName=labapp-canary
-  # then watch the "color" field shift ~20% of the time:
-  1..30 | ForEach-Object { (curl -s http://labapp.websolutsg.co.uk/info | ConvertFrom-Json).color }
-  ```
-  Weights are *relative*, not percentages — `80`/`20` and `8`/`2` behave
-  identically. They only look like percentages because they sum to 100.
-- **Header-based routing** — put a full rule list in `httpRoute.rules` (there is
-  a commented example in `values.yaml`); it replaces the generated rule
-  entirely. Rules are evaluated most-specific-first, not in file order.
-
-**Takeaway:** HTTPRoute moves routing from annotations into a typed, portable
-API, and splits ownership between the Gateway (infrastructure) and the route
-(your app). When nothing happens, check `Accepted` before you check anything
-else.
+**The point.** Horizontal autoscaling and persistent storage are compatible, but
+only in specific combinations. Ephemeral + HPA: fine. Shared RWX + HPA: fine.
+Per-pod RWO + HPA: works, and costs a disk per replica. Single RWO + HPA: broken
+(lab 4). That table is the thing to take away.
 
 ---
 
 ## Cleanup
 
 ```powershell
-kubectl delete -f argocd/application-dev.yaml
-kubectl delete -f argocd/application-prod.yaml
-kubectl delete ns lab-dev lab-prod --ignore-not-found
+helm uninstall demo-app -n demo-dev
+helm uninstall demo-app-trap -n demo-trap
+
+# PVCs are deliberately kept - storage.retainOnDelete and helm.sh/resource-policy.
+# They are real Azure resources and they are still costing money:
+kubectl -n demo-dev get pvc
+kubectl -n demo-dev delete pvc --all
+kubectl delete namespace demo-dev demo-trap demo-perpod
+```
+
+Then confirm the underlying disks and shares actually went, because a `Retain`
+reclaim policy leaves them behind:
+
+```powershell
+kubectl get pv
+az disk list -o table
 ```

@@ -1,0 +1,79 @@
+# -----------------------------------------------------------------------------
+# Overlay: a StatefulSet with one Azure Disk per pod (storage.mode = perPod)
+#
+#   helm upgrade --install demo-app demo -f demo/values.yaml -f demo/values-perpod.yaml
+#
+# This is what a database looks like in Kubernetes. Each pod has a stable name,
+# a stable DNS record, and its own disk that follows it around the cluster.
+#
+# Switching to this mode changes the controller from Deployment to StatefulSet.
+# Helm cannot mutate one into the other, so moving an existing release between
+# modes means deleting it first:
+#
+#   helm uninstall demo-app -n demo
+#   helm upgrade --install demo-app demo -f demo/values.yaml -f demo/values-perpod.yaml -n demo
+#
+# The PVCs survive that, by design - see storage.perPod.claimRetention.
+# -----------------------------------------------------------------------------
+storage:
+  mode: perPod
+  # managed-csi is Standard SSD; managed-csi-premium is Premium SSD and gives
+  # noticeably better fsync numbers on /write?fsync=1.
+  className: managed-csi
+  accessModes:
+    - ReadWriteOnce # an Azure Disk attaches to exactly one node. Never RWX.
+  size: 4Gi
+  mountPath: /data
+
+  perPod:
+    claimRetention:
+      # Retain is the interesting setting: scale 3 -> 1 -> 3 and the returning
+      # pods get their original disks back, with their original data. Set
+      # whenScaled to Delete and that data is destroyed the moment you scale in,
+      # which is usually a surprise rather than a plan.
+      whenDeleted: Retain
+      whenScaled: Retain
+    # 0, then 1, then 2 - each waiting for the one before it to be Ready. Slow
+    # on purpose: it makes disk attach time visible in `kubectl get pods -w`.
+    # Set it to Parallel and the same scale-up finishes in a third of the time.
+    podManagementPolicy: OrderedReady
+
+# The HPA drives the StatefulSet here. It works, but understand the bill: each
+# scale-up event provisions a new managed disk, and with whenScaled: Retain
+# those disks stay after scale-down. maxReplicas is deliberately small.
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 4
+  targetCPUUtilizationPercentage: 60
+
+# Attaching a disk takes longer than pulling a container, so give the pod more
+# room to start before the startup probe gives up on it.
+probes:
+  startup:
+    enabled: true
+    path: /healthz
+    initialDelaySeconds: 0
+    periodSeconds: 3
+    failureThreshold: 40 # 40 * 3s = 2 minutes
+
+# A disk must detach from the old node before it can attach to the new one, and
+# that cannot begin until the pod is fully gone. Rushing the shutdown here is
+# how you get a pod stuck in ContainerCreating on a Multi-Attach error.
+terminationGracePeriodSeconds: 60
+
+app:
+  environment: perpod
+  logRate: 2
+  shutdownDelaySeconds: 10
+
+# Its own hostname, so this release can run beside the other storage modes.
+#
+# Be aware of what a single load-balanced hostname means in this mode: the route
+# round-robins across pods that each have their OWN volume, so repeated calls to
+# /boots or /ls answer from different data every time. That is not a routing
+# bug - it is what "one disk per replica" means. Address a specific replica
+# through the headless Service instead (see lab 5).
+httpRoute:
+  hostnames:
+    - demoapp-perpod.websolutsg.co.uk

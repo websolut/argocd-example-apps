@@ -1,0 +1,33 @@
+{{- if .Values.serviceMonitor.enabled }}
+{{/*
+Needs the Prometheus Operator CRDs - Azure Managed Prometheus or
+kube-prometheus-stack. Off by default so `helm template` never breaks on a
+cluster that does not have them.
+
+The storage series are the interesting ones here:
+
+  demo_app_volume_used_bytes / demo_app_volume_bytes_total
+  demo_app_last_fsync_milliseconds
+  demo_app_write_errors_total
+
+Graph that first pair while you run the fill lab and you have built a disk-full
+alert out of an app metric rather than a node metric.
+*/}}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "demo-app.fullname" . }}
+  labels:
+    {{- include "demo-app.labels" . | nindent 4 }}
+    {{- with .Values.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "demo-app.selectorLabels" . | nindent 6 }}
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: {{ .Values.serviceMonitor.interval }}
+{{- end }}

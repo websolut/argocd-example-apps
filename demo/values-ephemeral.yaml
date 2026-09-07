@@ -1,0 +1,34 @@
+# -----------------------------------------------------------------------------
+# Overlay: no persistence at all (storage.mode = none)
+#
+#   helm upgrade --install demo-app demo -f demo/values.yaml -f demo/values-ephemeral.yaml
+#
+# Start here. This is the baseline you are trying to improve on, and it is worth
+# seeing fail before you fix it: write a file, crash the pod, watch the file go.
+#
+# An emptyDir is not useless - it is the right answer for caches, scratch space
+# and anything you can rebuild. It is only wrong when you assumed it was a disk.
+# -----------------------------------------------------------------------------
+storage:
+  mode: none
+  emptyDirSizeLimit: 512Mi
+
+# Nothing to share and nothing to attach, so the HPA is completely unconstrained
+# here. Every replica is genuinely interchangeable.
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 60
+
+app:
+  environment: ephemeral
+  logRate: 2
+
+# Its own hostname, so this release can run beside the other two storage modes
+# without three HTTPRoutes competing for one hostname on the shared Gateway.
+# The Gateway needs a listener that accepts it - either one per hostname, or a
+# single wildcard listener for *.websolutsg.co.uk.
+httpRoute:
+  hostnames:
+    - demoapp-ephemeral.websolutsg.co.uk

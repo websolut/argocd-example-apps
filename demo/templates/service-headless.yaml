@@ -1,0 +1,33 @@
+{{- if include "demo-app.isStateful" . }}
+{{/*
+A headless Service - clusterIP: None - required by the StatefulSet above.
+
+It creates no load balancer and no single virtual IP. Instead it publishes one
+DNS A record per pod, which is what makes a specific replica addressable:
+
+  kubectl run curl --rm -it --image=curlimages/curl -- \
+    curl http://demo-app-0.demo-app-headless:80/boots
+
+Ask pod 0 and pod 1 the same question and you can see that they are looking at
+two different volumes. The normal Service in service.yaml still exists and
+still round-robins across all pods.
+*/}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "demo-app.headlessName" . }}
+  labels:
+    {{- include "demo-app.labels" . | nindent 4 }}
+spec:
+  clusterIP: None
+  # Give each pod DNS as soon as it exists, before it passes its probes. Without
+  # this, a StatefulSet member that is starting up has no DNS name yet.
+  publishNotReadyAddresses: true
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: http
+      protocol: TCP
+  selector:
+    {{- include "demo-app.selectorLabels" . | nindent 4 }}
+{{- end }}

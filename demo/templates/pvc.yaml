@@ -1,0 +1,48 @@
+{{- if eq .Values.storage.mode "shared" }}
+{{/*
+The single shared claim, mounted by every replica at once.
+
+A PVC is a REQUEST: size, access mode, class. The CSI driver answers it with a
+PersistentVolume - on AKS, an actual Azure Files share or managed disk. Look at
+both sides of that:
+
+  kubectl get pvc
+  kubectl get pv
+  kubectl describe pvc <name>
+
+If the claim sits in Pending, describe it. The reason is nearly always one of:
+no such StorageClass, an access mode the class cannot provide, or - with
+volumeBindingMode WaitForFirstConsumer - no pod scheduled yet, which is normal
+and resolves itself as soon as one is.
+*/}}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "demo-app.claimName" . }}
+  labels:
+    {{- include "demo-app.labels" . | nindent 4 }}
+  {{- if .Values.storage.retainOnDelete }}
+  annotations:
+    # Survive a helm uninstall...
+    helm.sh/resource-policy: keep
+    # ...and survive an Argo CD prune. Without this, deleting the Application
+    # deletes the claim, and with a Delete reclaim policy the Azure resource
+    # behind it - and the data on it - goes too.
+    argocd.argoproj.io/sync-options: Prune=false
+  {{- end }}
+spec:
+  accessModes:
+    {{- toYaml .Values.storage.accessModes | nindent 4 }}
+  {{- if .Values.storage.className }}
+  storageClassName: {{ .Values.storage.className }}
+  {{- else }}
+  # No storageClassName set, so the default class is used. Find out which one
+  # that is with `kubectl get sc` and look for the (default) marker.
+  {{- end }}
+  resources:
+    requests:
+      # Raising this number is an in-place expansion, NOT a replacement, and it
+      # only works when the StorageClass has allowVolumeExpansion: true.
+      # Lowering it is never allowed - the API server rejects the update.
+      storage: {{ .Values.storage.size }}
+{{- end }}

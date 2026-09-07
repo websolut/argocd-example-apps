@@ -1,0 +1,122 @@
+{{- if .Values.httpRoute.enabled }}
+{{/*
+Gateway API HTTPRoute - the successor to Ingress, and the only way in for this
+chart. There is no ingress.yaml.
+
+Attaches to a Gateway that already exists. The chart never creates one: a
+Gateway owns a public IP and a certificate, so it is cluster infrastructure run
+once by whoever owns the platform, and app charts publish routes to it.
+
+  kubectl get gateway -A       # which Gateway can I attach to?
+  kubectl get gatewayclass     # which controller is behind it
+
+Attachment is a TWO-WAY handshake, unlike Ingress, and both sides can refuse:
+
+  * the Gateway listener must allow routes from this namespace
+    (allowedRoutes.namespaces.from: All, or a selector that matches it)
+  * this route's hostnames must INTERSECT the listener hostname
+
+Neither failure stops the sync or logs anything on the app side. The route is
+created, Argo CD goes green, and traffic 404s. The outcome only shows up here:
+
+  kubectl -n {{ .Release.Namespace }} describe httproute {{ include "demo-app.fullname" . }}
+
+under Parents -> Conditions. Accepted=False with
+reason NotAllowedByListeners is the namespace problem; Accepted=True but
+ResolvedRefs=False is usually a backend Service name typo.
+*/}}
+{{- $fullName := include "demo-app.fullname" . -}}
+{{- $svcPort := .Values.service.port -}}
+{{- $canary := .Values.httpRoute.canary -}}
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ $fullName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "demo-app.labels" . | nindent 4 }}
+  {{- with .Values.httpRoute.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.httpRoute.hostnames }}
+  # These must overlap the listener hostname on the Gateway. A Gateway listener
+  # with hostname argocd.example.com will NOT accept a route for
+  # demoapp.example.com - the platform team adds a listener per hostname, or
+  # uses a wildcard like *.example.com.
+  hostnames:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  parentRefs:
+    {{- range .Values.httpRoute.parentRefs }}
+    - name: {{ .name }}
+      {{- with .namespace }}
+      # Required whenever the Gateway lives in a different namespace from this
+      # release - which is the normal case for a shared platform Gateway. Omit
+      # it and Kubernetes looks for the Gateway in {{ $.Release.Namespace }} and
+      # silently finds nothing.
+      namespace: {{ . }}
+      {{- end }}
+      {{- with .sectionName }}
+      # Attach to one named listener only. Leave it empty to attach to every
+      # listener that will accept this route, which for a Gateway with both an
+      # HTTP and an HTTPS listener means the app answers on both - usually what
+      # you want, since the ACME HTTP-01 challenge needs port 80 to stay open.
+      sectionName: {{ . }}
+      {{- end }}
+      {{- with .port }}
+      port: {{ . }}
+      {{- end }}
+      {{- with .kind }}
+      kind: {{ . }}
+      {{- end }}
+    {{- end }}
+  rules:
+    {{- if .Values.httpRoute.rules }}
+    {{- /* Full control: rules given verbatim in values. */}}
+    {{- toYaml .Values.httpRoute.rules | nindent 4 }}
+    {{- else }}
+    {{- /* Default: everything for these hostnames goes to this release.
+           A rule with no `matches` means "match every path". */}}
+    - backendRefs:
+        - name: {{ $fullName }}
+          port: {{ $svcPort }}
+          {{- if $canary.enabled }}
+          weight: {{ sub 100 (int $canary.weight) }}
+          {{- end }}
+        {{- if $canary.enabled }}
+        # Weighted traffic splitting, built into the API - no annotations and no
+        # second controller. Weights are relative, not percentages; they only
+        # look like percentages because they add up to 100 here.
+        - name: {{ required "httpRoute.canary.serviceName is required when canary is enabled" $canary.serviceName }}
+          port: {{ default $svcPort $canary.port }}
+          weight: {{ int $canary.weight }}
+        {{- end }}
+      {{- with .Values.httpRoute.matches }}
+      matches:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.httpRoute.filters }}
+      filters:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.httpRoute.timeouts }}
+      timeouts:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    {{- end }}
+{{- if include "demo-app.isStateful" . }}
+{{- /*
+  Worth knowing in perPod mode: this route round-robins across pods that each
+  have their OWN volume, so repeated calls to /boots or /ls through the Gateway
+  answer from different data every time. That is not a bug in the route - it is
+  what "one disk per replica" means, and it is why a stateful workload is
+  normally addressed per-pod through the headless Service rather than through a
+  single load-balanced hostname.
+
+  If you want a stable hostname per replica, give each pod its own Service and
+  route on a path or header. httpRoute.rules is the hook for that.
+*/}}
+{{- end }}
+{{- end }}

@@ -2,12 +2,17 @@
 values-local.yaml
 *.local.yaml
 
+# Rendered output from `helm template ... > out.yaml` while debugging
+out.yaml
+rendered/
+
 # Editors / OS
 .vscode/
 .idea/
 .DS_Store
 Thumbs.db
 
-# Python bytecode (app.py is run straight from the ConfigMap, but just in case)
+# Python bytecode. app.py runs straight from the ConfigMap, but it also gets
+# run locally during development - see the README.
 __pycache__/
 *.pyc

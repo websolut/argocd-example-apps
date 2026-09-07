@@ -1,0 +1,22 @@
+{{- if .Values.podDisruptionBudget.enabled }}
+{{/*
+Caps how many pods a VOLUNTARY disruption may take down at once - a node drain,
+an AKS node-image upgrade, a cluster-autoscaler scale-in. It does not apply to
+crashes, OOM kills, or kubectl delete pod.
+
+Worth knowing before you enable it: a PDB that can never be satisfied blocks
+node drains forever. minAvailable 1 against a single replica is the classic way
+to wedge a cluster upgrade, which is why this is off by default.
+*/}}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "demo-app.fullname" . }}
+  labels:
+    {{- include "demo-app.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "demo-app.selectorLabels" . | nindent 6 }}
+{{- end }}

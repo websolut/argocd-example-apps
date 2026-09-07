@@ -1,52 +1,53 @@
-# Argo CD Application - dev
+# Argo CD Application - demo-app, dev
 #
 # This object lives in the Argo CD namespace (usually `argocd`), not in the
 # namespace the app is deployed to. Apply it once by hand:
 #
-#   kubectl apply -f argocd/application-dev.yaml
+#   kubectl apply -f demo/argocd/application-dev.yaml
 #
-# From then on Argo CD watches the git repo and reconciles the cluster.
-# Replace repoURL with your own remote before applying.
+# From then on Argo CD watches the repo and reconciles the cluster.
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
-  name: lab-app-dev
+  name: demo-app-dev
   namespace: argocd
-  # Keeps Argo CD from deleting the child resources if you delete the App by
-  # accident. Remove the finalizer line if you DO want cascading deletes.
+  # Keeps Argo CD from orphaning the child resources if the Application is
+  # deleted by accident. Remove this line if you DO want cascading deletes.
   finalizers:
     - resources-finalizer.argocd.argoproj.io
 spec:
   project: default
 
   source:
-    repoURL: https://github.com/YOUR-ORG/aks-lab.git
-    targetRevision: main
-    path: charts/lab-app
+    repoURL: https://github.com/websolut/argocd-example-apps.git
+    targetRevision: master
+    path: demo
     helm:
-      releaseName: lab-app
-      # Later files win. values.yaml is the base, values-dev.yaml the overlay.
+      releaseName: demo-app
+      # Later files win. values.yaml is the base, the overlay picks the storage
+      # mode. Swap values-shared.yaml for values-ephemeral.yaml or
+      # values-perpod.yaml to change what kind of volume this app gets.
       #
       # IMPORTANT: a template guarded by `{{ if .Values.x.enabled }}` renders to
       # nothing unless a file listed HERE turns it on. Argo CD does not scan the
       # chart directory - it runs `helm template` with exactly these files, so a
-      # values file you do not list might as well not exist. The same is true of
-      # an app created in the Argo CD UI: it uses values.yaml alone unless you
-      # fill in the VALUES FILES field. If a resource never shows up in the UI
-      # at all, check that before anything else:
-      #   argocd app manifests lab-app-dev | grep -i httproute
+      # values file you did not list might as well not exist. The same applies
+      # to an Application created in the Argo CD UI: it uses values.yaml alone
+      # unless you fill in the VALUES FILES field. If a resource never appears,
+      # check that before anything else:
+      #   argocd app manifests demo-app-dev | grep -i persistentvolumeclaim
       valueFiles:
         - values.yaml
-        - values-dev.yaml
-      # Inline overrides beat the files - useful for a quick experiment, but
+        - values-shared.yaml
+      # Inline overrides beat the files - handy for a quick experiment, but
       # remember that git is supposed to be the source of truth.
       parameters: []
-      #  - name: app.logRate
-      #    value: "10"
+      #  - name: storage.size
+      #    value: 8Gi
 
   destination:
     server: https://kubernetes.default.svc
-    namespace: lab-dev
+    namespace: demo-dev
 
   syncPolicy:
     automated:
@@ -57,7 +58,9 @@ spec:
       - CreateNamespace=true
       - PrunePropagationPolicy=foreground
       - PruneLast=true
-      # Server-side apply avoids the "annotation too large" problem on big CRDs.
+      # Server-side apply avoids the "annotation too large" problem, which this
+      # chart would otherwise hit: app.py is embedded in a ConfigMap, and the
+      # client-side last-applied-configuration annotation has a 256KB limit.
       - ServerSideApply=true
     retry:
       limit: 5
@@ -68,11 +71,38 @@ spec:
 
   revisionHistoryLimit: 10
 
-  # The HPA writes spec.replicas on the Deployment. The chart already omits
-  # replicas when autoscaling is enabled, but this makes it explicit: Argo CD
-  # must never treat a scaled-up Deployment as "OutOfSync".
   ignoreDifferences:
+    # The HPA writes spec.replicas on the workload. The chart already omits
+    # replicas when autoscaling is enabled, but this makes it explicit: Argo CD
+    # must never treat a scaled-up workload as OutOfSync and scale it back.
     - group: apps
       kind: Deployment
       jsonPointers:
         - /spec/replicas
+    - group: apps
+      kind: StatefulSet
+      jsonPointers:
+        - /spec/replicas
+
+    # ---------------------------------------------------------------------
+    # Storage-specific, and the reason this file is worth reading.
+    #
+    # A PVC is mostly immutable once bound, and the cluster fills in fields the
+    # chart never set: volumeName, the bound StorageClass, and - after an
+    # in-place expansion - a spec.resources.requests.storage LARGER than what
+    # git says. selfHeal then tries to shrink it back, which the API server
+    # rejects, and the Application sticks in OutOfSync forever.
+    #
+    # Two honest ways out:
+    #   1. Expand in git (bump storage.size, commit) and let Argo CD apply it.
+    #      This is the correct GitOps answer and needs none of the ignore rules.
+    #   2. Expand with kubectl for a quick experiment and ignore the drift,
+    #      which is what the rule below does.
+    #
+    # Uncomment it for the volume-expansion lab, then remove it again - an
+    # ignoreDifferences rule you forget about is a silent hole in your GitOps.
+    # ---------------------------------------------------------------------
+    # - kind: PersistentVolumeClaim
+    #   jsonPointers:
+    #     - /spec/resources/requests/storage
+    #     - /spec/volumeName

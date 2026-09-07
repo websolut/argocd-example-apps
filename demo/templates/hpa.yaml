@@ -1,0 +1,48 @@
+{{- if .Values.autoscaling.enabled }}
+{{/*
+Requires metrics-server, which AKS installs by default. Check that it works:
+  kubectl top pods
+If kubectl top returns nothing, the HPA reports <unknown> for utilisation and
+will never scale.
+
+Note that scaleTargetRef follows storage.mode: an HPA scales a StatefulSet just
+as happily as a Deployment. What changes is the consequence - every new replica
+of a StatefulSet also provisions a new disk, so scaling out costs money, and
+scaling in with whenScaled: Retain leaves those disks behind.
+*/}}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "demo-app.fullname" . }}
+  labels:
+    {{- include "demo-app.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: {{ include "demo-app.controllerKind" . }}
+    name: {{ include "demo-app.fullname" . }}
+  minReplicas: {{ .Values.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.autoscaling.maxReplicas }}
+  metrics:
+    {{- if .Values.autoscaling.targetCPUUtilizationPercentage }}
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          # A percentage of resources.requests.cpu, not of the node.
+          type: Utilization
+          averageUtilization: {{ .Values.autoscaling.targetCPUUtilizationPercentage }}
+    {{- end }}
+    {{- if .Values.autoscaling.targetMemoryUtilizationPercentage }}
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.autoscaling.targetMemoryUtilizationPercentage }}
+    {{- end }}
+  {{- with .Values.autoscaling.behavior }}
+  behavior:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}
