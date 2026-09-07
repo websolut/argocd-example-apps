@@ -6,3 +6,13 @@ spec:
   containers:
     - name: nginx
       image: nginx:1.27-alpine
+      volumeMounts:
+        # nginx serves whatever is in this directory, so the Azure Files share
+        # becomes the web root. Mounting here HIDES the image default
+        # index.html - see the README note about the 403.
+        - name: data
+          mountPath: /mnt/azure
+  volumes:
+    - name: data
+      persistentVolumeClaim:
+        claimName: test-pvc
