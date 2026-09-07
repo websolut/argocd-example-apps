@@ -1,0 +1,40 @@
+# Argo CD Application - prod-shaped environment.
+#
+# Same chart, different overlay, and sync is MANUAL: selfHeal/automated are off
+# so you have to press Sync (or run `argocd app sync lab-app-prod`). That is a
+# common real-world split - dev auto-syncs, prod is gated.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: lab-app-prod
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+
+  source:
+    repoURL: https://github.com/YOUR-ORG/aks-lab.git
+    targetRevision: main
+    path: charts/lab-app
+    helm:
+      releaseName: lab-app
+      valueFiles:
+        - values.yaml
+        - values-prod.yaml
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: lab-prod
+
+  syncPolicy:
+    # No `automated:` block -> manual sync only.
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+
+  ignoreDifferences:
+    - group: apps
+      kind: Deployment
+      jsonPointers:
+        - /spec/replicas

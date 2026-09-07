@@ -1,0 +1,17 @@
+# Helm
+charts/**/charts/
+*.tgz
+
+# Local overrides you do not want in git
+values-local.yaml
+*.local.yaml
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Python bytecode (app.py is run straight from the ConfigMap, but just in case)
+__pycache__/
+*.pyc

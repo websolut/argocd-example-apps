@@ -1,0 +1,78 @@
+# Argo CD Application - dev
+#
+# This object lives in the Argo CD namespace (usually `argocd`), not in the
+# namespace the app is deployed to. Apply it once by hand:
+#
+#   kubectl apply -f argocd/application-dev.yaml
+#
+# From then on Argo CD watches the git repo and reconciles the cluster.
+# Replace repoURL with your own remote before applying.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: lab-app-dev
+  namespace: argocd
+  # Keeps Argo CD from deleting the child resources if you delete the App by
+  # accident. Remove the finalizer line if you DO want cascading deletes.
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+
+  source:
+    repoURL: https://github.com/YOUR-ORG/aks-lab.git
+    targetRevision: main
+    path: charts/lab-app
+    helm:
+      releaseName: lab-app
+      # Later files win. values.yaml is the base, values-dev.yaml the overlay.
+      #
+      # IMPORTANT: a template guarded by `{{ if .Values.x.enabled }}` renders to
+      # nothing unless a file listed HERE turns it on. Argo CD does not scan the
+      # chart directory - it runs `helm template` with exactly these files, so a
+      # values file you do not list might as well not exist. The same is true of
+      # an app created in the Argo CD UI: it uses values.yaml alone unless you
+      # fill in the VALUES FILES field. If a resource never shows up in the UI
+      # at all, check that before anything else:
+      #   argocd app manifests lab-app-dev | grep -i httproute
+      valueFiles:
+        - values.yaml
+        - values-dev.yaml
+      # Inline overrides beat the files - useful for a quick experiment, but
+      # remember that git is supposed to be the source of truth.
+      parameters: []
+      #  - name: app.logRate
+      #    value: "10"
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: lab-dev
+
+  syncPolicy:
+    automated:
+      prune: true # delete resources removed from git
+      selfHeal: true # revert manual kubectl edits
+      allowEmpty: false
+    syncOptions:
+      - CreateNamespace=true
+      - PrunePropagationPolicy=foreground
+      - PruneLast=true
+      # Server-side apply avoids the "annotation too large" problem on big CRDs.
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+
+  revisionHistoryLimit: 10
+
+  # The HPA writes spec.replicas on the Deployment. The chart already omits
+  # replicas when autoscaling is enabled, but this makes it explicit: Argo CD
+  # must never treat a scaled-up Deployment as "OutOfSync".
+  ignoreDifferences:
+    - group: apps
+      kind: Deployment
+      jsonPointers:
+        - /spec/replicas

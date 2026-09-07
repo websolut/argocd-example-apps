@@ -1,0 +1,60 @@
+# Optional: one ApplicationSet instead of one Application per environment.
+#
+# Argo CD generates a child Application for each entry in the list generator.
+# Adding an environment then means adding four lines here.
+#
+#   kubectl apply -f argocd/applicationset.yaml
+#
+# Use EITHER this file OR the application-*.yaml files - not both, or two
+# controllers will manage the same releases.
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: lab-app
+  namespace: argocd
+spec:
+  goTemplate: true
+  goTemplateOptions: ["missingkey=error"]
+  generators:
+    - list:
+        elements:
+          - env: dev
+            namespace: lab-dev
+          - env: prod
+            namespace: lab-prod
+  template:
+    metadata:
+      name: 'lab-app-{{ .env }}'
+    spec:
+      project: default
+      source:
+        repoURL: https://github.com/YOUR-ORG/aks-lab.git
+        targetRevision: main
+        path: charts/lab-app
+        helm:
+          releaseName: lab-app
+          valueFiles:
+            - values.yaml
+            - 'values-{{ .env }}.yaml'
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: '{{ .namespace }}'
+      syncPolicy:
+        # Every generated Application gets the same policy. If you want dev to
+        # auto-sync and prod to be gated, use the two application-*.yaml files
+        # instead, or add a templatePatch here.
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - CreateNamespace=true
+          - ServerSideApply=true
+      ignoreDifferences:
+        - group: apps
+          kind: Deployment
+          jsonPointers:
+            - /spec/replicas
+  # Do not delete generated Applications when an element disappears; you must
+  # remove them yourself. Drop this to get full lifecycle management.
+  syncPolicy:
+    preserveResourcesOnDeletion: true

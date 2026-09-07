@@ -1,0 +1,6 @@
+# Keep LF in the working tree on Windows too.
+#
+# app.py is read verbatim by `.Files.Get` and embedded in a ConfigMap, and
+# load.sh runs on Linux - CRLF in either one causes odd, hard-to-spot failures.
+* text=auto eol=lf
+*.ps1 text eol=crlf
