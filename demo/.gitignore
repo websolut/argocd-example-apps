@@ -1,7 +1,3 @@
-# Helm
-charts/**/charts/
-*.tgz
-
 # Local overrides you do not want in git
 values-local.yaml
 *.local.yaml
