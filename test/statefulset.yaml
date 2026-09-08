@@ -1,0 +1,79 @@
+# Headless Service - required by the StatefulSet below.
+#
+# clusterIP: None means no load balancer and no single virtual IP. Instead
+# Kubernetes publishes one DNS record per pod, which is what makes a specific
+# replica - and therefore a specific disk - addressable:
+#
+#   test-sts-0.test-sts.<namespace>.svc.cluster.local
+#   test-sts-1.test-sts.<namespace>.svc.cluster.local
+apiVersion: v1
+kind: Service
+metadata:
+  name: test-sts
+spec:
+  clusterIP: None
+  selector:
+    app: test-sts
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: test-sts
+spec:
+  # Must name the headless Service above, or the per-pod DNS records are
+  # never created.
+  serviceName: test-sts
+
+  # Two replicas is the whole point: each one provisions its OWN disk, so
+  # scaling out here is safe in a way the RWO Deployment in deployment.yaml
+  # is not.
+  replicas: 2
+
+  selector:
+    matchLabels:
+      app: test-sts
+  template:
+    metadata:
+      labels:
+        app: test-sts
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:1.27-alpine
+          ports:
+            - name: http
+              containerPort: 80
+          volumeMounts:
+            # Name must match the volumeClaimTemplate below. Note there is no
+            # `volumes:` block in this pod spec at all - the StatefulSet
+            # supplies the volume per pod, which is the only mechanism in
+            # Kubernetes that does that.
+            - name: data
+              mountPath: /usr/share/nginx/html
+
+  # Kubernetes 1.27+. Retain/Retain is why scaling 2 -> 1 -> 2 hands the
+  # returning pod its original disk and data back. Set whenScaled to Delete
+  # and that data is destroyed the moment you scale in - which is usually a
+  # surprise rather than a plan.
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Retain
+    whenScaled: Retain
+
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        # ReadWriteOnce is correct here. Each pod has its own disk, so there is
+        # nothing to share and no Multi-Attach error to hit.
+        accessModes:
+          - ReadWriteOnce
+        storageClassName: managed-csi
+        resources:
+          requests:
+            # 1Gi is the practical floor for an Azure managed disk; ask for
+            # less and the CSI driver rounds up to it anyway.
+            storage: 1Gi
