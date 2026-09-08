@@ -1,0 +1,121 @@
+# A sidecar container: two containers in ONE pod, sharing a volume.
+#
+# nginx serves the web root. The `content` sidecar rewrites index.html every
+# five seconds. Neither container knows anything about the other - they only
+# agree on a directory, which is the whole idea.
+#
+# What a sidecar gets you that a second pod would not:
+#   * the same emptyDir, so they can pass files
+#   * the same network namespace, so they reach each other on localhost
+#   * one lifecycle - they are scheduled, scaled and deleted together
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: test-sidecar
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: test-sidecar
+  template:
+    metadata:
+      labels:
+        app: test-sidecar
+    spec:
+      containers:
+        # ---- the app -------------------------------------------------------
+        - name: nginx
+          image: nginx:1.27-alpine
+          ports:
+            - name: http
+              containerPort: 80
+          volumeMounts:
+            - name: html
+              mountPath: /usr/share/nginx/html
+              # The app only reads. Only the sidecar writes. Enforcing that
+              # here means a bug in nginx cannot corrupt the content.
+              readOnly: true
+
+        # ---- the sidecar ---------------------------------------------------
+        - name: content
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              while true; do
+                echo "<h1>$(hostname)</h1><p>updated $(date -u +%H:%M:%SZ)</p>" > /html/index.html
+                sleep 5
+              done
+          volumeMounts:
+            # Same volume, mounted at a different path. The mount paths do not
+            # have to match - only the volume name does.
+            - name: html
+              mountPath: /html
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+
+      volumes:
+        # emptyDir, not a PVC: this content is generated and thrown away, so
+        # there is nothing worth persisting. It lives as long as the pod.
+        - name: html
+          emptyDir: {}
+---
+# The Service. Gateway API routes to a Service, never to pods directly, so this
+# is the piece that makes the sidecar pod addressable at all.
+#
+# ClusterIP is correct here: the Istio Gateway already owns the public IP, so a
+# LoadBalancer Service would just be a second, unused one.
+apiVersion: v1
+kind: Service
+metadata:
+  name: test-sidecar
+spec:
+  type: ClusterIP
+  # Matches the pod labels in the Deployment above. This is the only link
+  # between the two - get it wrong and the Service has no endpoints and every
+  # request returns 503. Check with: kubectl get endpoints test-sidecar
+  selector:
+    app: test-sidecar
+  ports:
+    # Istio infers the protocol from the port NAME. Calling it `http` is what
+    # gets you HTTP-aware routing, retries and telemetry; an unnamed port is
+    # treated as opaque TCP and you lose all of it.
+    - name: http
+      port: 80
+      # The container port is named `http`, so this stays correct even if the
+      # container port number changes.
+      targetPort: http
+      protocol: TCP
+---
+# The HTTPRoute. This is what actually publishes it - the Service alone is
+# reachable only inside the cluster.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: test-sidecar
+spec:
+  hostnames:
+    - nginx.websolutsg.co.uk
+  parentRefs:
+    - name: platform-gateway
+      namespace: default
+      # Attach to the port 80 listener specifically.
+      #
+      # That listener has no hostname, so it accepts any Host - including this
+      # one. The https listener does NOT: its hostname is
+      # argocd.websolutsg.co.uk, which nginx.websolutsg.co.uk does not match,
+      # so it would refuse this route. Naming the listener here keeps that
+      # refusal from showing up as a confusing condition on the route.
+      #
+      # For HTTPS, add a listener to the Gateway with either this hostname or a
+      # wildcard (*.websolutsg.co.uk), then drop this sectionName line so the
+      # route attaches to both.
+      sectionName: http
+  rules:
+    # No `matches`, so every path for this hostname goes to the Service.
+    - backendRefs:
+        - name: test-sidecar
+          port: 80

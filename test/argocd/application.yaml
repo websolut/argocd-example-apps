@@ -1,0 +1,59 @@
+# Argo CD Application for the test/ folder.
+#
+# Lives in test/argocd/ rather than test/ on purpose. The source below points at
+# `test` with recurse: false, so Argo CD reads only the top-level files there
+# and never sees this file. Put an Application manifest inside its own watched
+# path and Argo CD tries to apply the Application into the DESTINATION
+# namespace, where Applications do not belong.
+#
+# Apply it once by hand:
+#   kubectl apply -f test/argocd/application.yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: test
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+
+  source:
+    repoURL: https://github.com/websolut/argocd-example-apps.git
+    targetRevision: master
+    path: test
+    directory:
+      # Plain manifests, no Helm or Kustomize. Keep this false so the
+      # argocd/ subfolder - this file - stays out of the app.
+      recurse: false
+
+  destination:
+    server: https://kubernetes.default.svc
+    # Change this if your test resources live somewhere else. Whatever you put
+    # here is injected into every manifest in test/, none of which set a
+    # namespace of their own.
+    namespace: default
+
+  syncPolicy:
+    automated:
+      # The setting this file exists for. Without it, deleting or commenting
+      # out a manifest leaves the live object running and merely OutOfSync.
+      prune: true
+      # Revert manual kubectl edits back to what git says.
+      selfHeal: true
+      # Refuse to sync if the path renders NO manifests at all. Guards against
+      # a bad commit wiping the whole app in one go.
+      allowEmpty: false
+    syncOptions:
+      # Delete owners before dependents, so a StatefulSet goes before anything
+      # of its own, and hold claims until the pods using them are gone.
+      - PrunePropagationPolicy=foreground
+      - PruneLast=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+
+  revisionHistoryLimit: 10
