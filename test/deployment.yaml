@@ -1,0 +1,49 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: test-app
+spec:
+  # Must stay at 1 while test-pvc-disk (ReadWriteOnce) is mounted. An Azure
+  # Disk attaches to exactly one node, so a second replica on another node
+  # hangs forever with a Multi-Attach error.
+  replicas: 1
+  strategy:
+    # Recreate, not RollingUpdate, for the same reason. A rolling update would
+    # deadlock: the new pod cannot attach the disk while the old pod still
+    # holds it, so the new pod sits in ContainerCreating and the old one never
+    # goes away. Recreate stops the old pod first, then starts the new one -
+    # at the cost of a gap with no pod running.
+    type: Recreate
+  # The selector is immutable once created. Never put anything volatile
+  # (a version, a checksum) in here.
+  selector:
+    matchLabels:
+      app: test-app
+  template:
+    metadata:
+      labels:
+        # Must match the selector above, or the Deployment is rejected.
+        app: test-app
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:1.27-alpine
+          volumeMounts:
+            # nginx serves whatever is in this directory, so the Azure Files
+            # share becomes the web root. Mounting here HIDES the image default
+            # index.html, so an empty share returns 403 until you add a file.
+            - name: data
+              mountPath: /usr/share/nginx/html
+            # The Azure Disk. Just a mount point - nginx does not serve from it.
+            - name: disk
+              mountPath: /mnt/disk
+      volumes:
+        - name: data
+          # ReadWriteMany (Azure Files), so this claim could back many replicas.
+          persistentVolumeClaim:
+            claimName: test-pvc
+        - name: disk
+          # ReadWriteOnce (Azure Disk) - this is the one that pins us to one
+          # replica and to the Recreate strategy above.
+          persistentVolumeClaim:
+            claimName: test-pvc-disk
