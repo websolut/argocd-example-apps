@@ -23,7 +23,12 @@ spec:
         # index.html, so an empty share returns 403 until you put a file in it.
         - name: data
           mountPath: /usr/share/nginx/html
+        - name: disk
+          mountPath: /mnt/disk
   volumes:
     - name: data
       persistentVolumeClaim:
         claimName: test-pvc
+    - name: disk
+      persistentVolumeClaim:
+        claimName: test-pvc-disk
