@@ -1,0 +1,68 @@
+# # Overprovisioning: trade idle capacity for scale-up speed.
+# #
+# # Node scale-up on AKS takes minutes. These placeholder pods hold real capacity
+# # and are thrown away the instant something important needs it, so a burst gets
+# # scheduled in seconds instead of waiting for a node.
+# #
+# # The cycle:
+# #   1. pause pods sit at priority -1, holding CPU and memory
+# #   2. a normal pod (priority 0) needs room, and the scheduler preempts them
+# #   3. the real pod starts immediately - no node provisioning
+# #   4. the evicted pause pods go Pending, which triggers the cluster autoscaler
+# #      to add a node, restoring the buffer for next time
+# apiVersion: scheduling.k8s.io/v1
+# kind: PriorityClass
+# metadata:
+#   # Cluster-scoped - no namespace. It is shared by the whole cluster, so the
+#   # name is worth choosing carefully.
+#   name: overprovisioning
+# # Negative, so ANY normal pod (which defaults to 0) outranks these and can
+# # preempt them. But stay above -10: the cluster autoscaler treats pods below
+# # its expendable-pods-priority-cutoff as disposable and will not scale up for
+# # them, which would break step 4 above.
+# value: -1
+# # Never set this to true here. It would make -1 the default for every pod in
+# # the cluster that does not name a class - including your real workloads.
+# globalDefault: false
+# preemptionPolicy: PreemptLowerPriority
+# description: "Placeholder capacity. Preempted by anything real."
+# ---
+# apiVersion: apps/v1
+# kind: Deployment
+# metadata:
+#   name: overprovisioning
+# spec:
+#   # Size the buffer: replicas x requests is how much capacity you are holding
+#   # in reserve. Two pods at 250m/256Mi reserves 500m CPU and 512Mi.
+#   replicas: 2
+#   selector:
+#     matchLabels:
+#       app: overprovisioning
+#   template:
+#     metadata:
+#       labels:
+#         app: overprovisioning
+#     spec:
+#       priorityClassName: overprovisioning
+
+#       # The whole point of the pattern. Default is 30 seconds, which would make
+#       # a preempted pod linger and delay the real pod it was making room for.
+#       # These containers hold no state and do no work, so there is nothing to
+#       # drain - kill them instantly.
+#       terminationGracePeriodSeconds: 0
+
+#       containers:
+#         - name: pause
+#           # Does nothing but sleep. The smallest possible way to hold a
+#           # resource reservation.
+#           image: registry.k8s.io/pause:3.9
+#           resources:
+#             # REQUESTS are what reserve capacity - the scheduler reads these,
+#             # not limits. A pause pod with no requests holds nothing at all and
+#             # the whole pattern silently does nothing. Match these to the shape
+#             # of the pod you want to be able to start instantly.
+#             requests:
+#               cpu: 250m
+#               memory: 256Mi
+#             limits:
+#               memory: 256Mi
